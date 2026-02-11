@@ -22,24 +22,29 @@ W14_NS = "http://schemas.microsoft.com/office/word/2010/wordml"
 W15_NS = "http://schemas.microsoft.com/office/word/2012/wordml"
 W16CEX_NS = "http://schemas.microsoft.com/office/word/2018/wordml/cex"
 W16CID_NS = "http://schemas.microsoft.com/office/word/2016/wordml/cid"
+MC_NS = "http://schemas.openxmlformats.org/markup-compatibility/2006"
 XML_NS = "http://www.w3.org/XML/1998/namespace"
 PKG_REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
 PKG_CT_NS = "http://schemas.openxmlformats.org/package/2006/content-types"
 COMMENTS_EXT_REL_TYPE = "http://schemas.microsoft.com/office/2011/relationships/commentsExtended"
 COMMENTS_IDS_REL_TYPE = "http://schemas.microsoft.com/office/2016/09/relationships/commentsIds"
 COMMENTS_EXTENSIBLE_REL_TYPE = "http://schemas.microsoft.com/office/2018/08/relationships/commentsExtensible"
+PEOPLE_REL_TYPE = "http://schemas.microsoft.com/office/2011/relationships/people"
 COMMENTS_EXT_CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.commentsExtended+xml"
 COMMENTS_IDS_CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.commentsIds+xml"
 COMMENTS_EXTENSIBLE_CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.commentsExtensible+xml"
+PEOPLE_CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.people+xml"
 COMMENTS_EXT_PART_NAME = "/word/commentsExtended.xml"
 COMMENTS_IDS_PART_NAME = "/word/commentsIds.xml"
 COMMENTS_EXTENSIBLE_PART_NAME = "/word/commentsExtensible.xml"
+PEOPLE_PART_NAME = "/word/people.xml"
 
 ET.register_namespace("w", W_NS)
 ET.register_namespace("w14", W14_NS)
 ET.register_namespace("w15", W15_NS)
 ET.register_namespace("w16cex", W16CEX_NS)
 ET.register_namespace("w16cid", W16CID_NS)
+ET.register_namespace("mc", MC_NS)
 COMMENT_START_ATTR_BLOCK_RE = re.compile(r"\{\.comment-start(?P<attrs>[^}]*)\}", re.DOTALL)
 COMMENT_END_ATTR_BLOCK_RE = re.compile(r"\{\.comment-end(?P<attrs>[^}]*)\}", re.DOTALL)
 NESTED_COMMENT_END_WRAPPER_RE = re.compile(
@@ -116,8 +121,23 @@ def parse_state_token(state_value):
     return "active"
 
 
-def annotate_markdown_comment_attrs(md_path: Path, parent_map, state_by_id):
-    if not parent_map and not state_by_id:
+def annotate_markdown_comment_attrs(
+    md_path: Path,
+    parent_map,
+    state_by_id,
+    para_by_id=None,
+    durable_by_id=None,
+    presence_provider_by_id=None,
+    presence_user_by_id=None,
+):
+    if (
+        not parent_map
+        and not state_by_id
+        and not para_by_id
+        and not durable_by_id
+        and not presence_provider_by_id
+        and not presence_user_by_id
+    ):
         return 0
     text = md_path.read_text(encoding="utf-8")
     changed = 0
@@ -137,6 +157,18 @@ def annotate_markdown_comment_attrs(md_path: Path, parent_map, state_by_id):
         if not kv.get("state"):
             state_token = parse_state_token((state_by_id or {}).get(cid))
             additions.append(f' state="{state_token}"')
+        para_id = (para_by_id or {}).get(cid)
+        if para_id and not kv.get("paraId"):
+            additions.append(f' paraId="{para_id}"')
+        durable_id = (durable_by_id or {}).get(cid)
+        if durable_id and not kv.get("durableId"):
+            additions.append(f' durableId="{durable_id}"')
+        presence_provider = (presence_provider_by_id or {}).get(cid)
+        if presence_provider and not kv.get("presenceProvider"):
+            additions.append(f' presenceProvider="{presence_provider}"')
+        presence_user = (presence_user_by_id or {}).get(cid)
+        if presence_user and not kv.get("presenceUserId"):
+            additions.append(f' presenceUserId="{presence_user}"')
 
         if not additions:
             return match.group(0)
@@ -209,6 +241,24 @@ def repair_unbalanced_comment_markers(markdown_text: str):
         updated = updated[:pos] + token + updated[pos:]
 
     return updated, len(insertions)
+
+
+def strip_comment_transport_attrs(markdown_text: str):
+    removed = 0
+
+    def repl(match):
+        nonlocal removed
+        block = match.group(0)
+        updated = re.sub(r'\s+paraId="[^"]*"', "", block)
+        updated = re.sub(r'\s+durableId="[^"]*"', "", updated)
+        updated = re.sub(r'\s+presenceProvider="[^"]*"', "", updated)
+        updated = re.sub(r'\s+presenceUserId="[^"]*"', "", updated)
+        if updated != block:
+            removed += 1
+        return updated
+
+    out = COMMENT_START_ATTR_BLOCK_RE.sub(repl, markdown_text)
+    return out, removed
 
 
 def normalize_nested_comment_end_markers(markdown_text: str):
@@ -450,6 +500,9 @@ def extract_comment_texts_from_markdown(md_path: Path, pandoc_extra_args):
     meta_by_id = {}
     parent_by_id = {}
     state_by_id = {}
+    para_by_id = {}
+    durable_by_id = {}
+    presence_by_author = {}
     seen_order = []
     started_ids = set()
 
@@ -486,11 +539,21 @@ def extract_comment_texts_from_markdown(md_path: Path, pandoc_extra_args):
                 meta_by_id[comment_id]["author"] = meta["author"]
             if meta.get("date") and not meta_by_id[comment_id].get("date"):
                 meta_by_id[comment_id]["date"] = meta["date"]
+            if meta.get("presenceProvider") and not meta_by_id[comment_id].get("presenceProvider"):
+                meta_by_id[comment_id]["presenceProvider"] = meta["presenceProvider"]
+            if meta.get("presenceUserId") and not meta_by_id[comment_id].get("presenceUserId"):
+                meta_by_id[comment_id]["presenceUserId"] = meta["presenceUserId"]
             parent_id = (meta.get("parent") or "").strip()
             if parent_id:
                 parent_by_id[comment_id] = parent_id
             if "state" in meta:
                 state_by_id[comment_id] = parse_state_token(meta.get("state"))
+            para_id = (meta.get("paraId") or "").strip()
+            if para_id:
+                para_by_id[comment_id] = para_id
+            durable_id = (meta.get("durableId") or "").strip()
+            if durable_id:
+                durable_by_id[comment_id] = durable_id
 
     def parse_span_meta(attr):
         if not (isinstance(attr, list) and len(attr) == 3):
@@ -503,7 +566,16 @@ def extract_comment_texts_from_markdown(md_path: Path, pandoc_extra_args):
             for item in kvs:
                 if isinstance(item, list) and len(item) == 2:
                     key, value = item
-                    if key in {"author", "date", "parent", "state"}:
+                    if key in {
+                        "author",
+                        "date",
+                        "parent",
+                        "state",
+                        "paraId",
+                        "durableId",
+                        "presenceProvider",
+                        "presenceUserId",
+                    }:
                         meta[key] = value
         return identifier, classes, meta
 
@@ -651,6 +723,16 @@ def extract_comment_texts_from_markdown(md_path: Path, pandoc_extra_args):
 
     for cid in ordered_started_ids:
         state_by_id[cid] = parse_state_token(state_by_id.get(cid))
+        meta = meta_by_id.get(cid, {})
+        author = (meta.get("author") or "").strip()
+        if author:
+            provider_id = (meta.get("presenceProvider") or "").strip()
+            user_id = (meta.get("presenceUserId") or "").strip()
+            if provider_id or user_id:
+                presence_by_author[author] = {
+                    "provider_id": provider_id,
+                    "user_id": user_id,
+                }
 
     return {
         "flattened_by_id": flattened_by_id,
@@ -658,11 +740,22 @@ def extract_comment_texts_from_markdown(md_path: Path, pandoc_extra_args):
         "child_ids": child_ids,
         "root_ids": root_ids,
         "state_by_id": state_by_id,
+        "para_by_id": para_by_id,
+        "durable_by_id": durable_by_id,
+        "presence_by_author": presence_by_author,
     }
 
 
-def append_comment_paragraph(comment_elem: ET.Element, text: str, with_annotation_ref=False):
+def append_comment_paragraph(
+    comment_elem: ET.Element,
+    text: str,
+    with_annotation_ref=False,
+    paragraph_attrs=None,
+):
     p = ET.SubElement(comment_elem, f"{{{W_NS}}}p")
+    if paragraph_attrs:
+        for key, value in paragraph_attrs.items():
+            p.set(key, value)
     ppr = ET.SubElement(p, f"{{{W_NS}}}pPr")
     pstyle = ET.SubElement(ppr, f"{{{W_NS}}}pStyle")
     pstyle.set(f"{{{W_NS}}}val", "CommentText")
@@ -703,12 +796,22 @@ def rewrite_comment_bodies_from_markdown(docx_dir: Path, comment_text_by_id, roo
         raw = comment_text_by_id.get(cid, "").strip()
         lines = raw.split("\n") if raw else [""]
 
+        first_existing_p = comment.find(f".//{{{W_NS}}}p")
+        first_paragraph_attrs = {}
+        if first_existing_p is not None:
+            first_paragraph_attrs = dict(first_existing_p.attrib)
+
         for child in list(comment):
             comment.remove(child)
 
         first = True
         for line in lines:
-            append_comment_paragraph(comment, line, with_annotation_ref=first)
+            append_comment_paragraph(
+                comment,
+                line,
+                with_annotation_ref=first,
+                paragraph_attrs=first_paragraph_attrs if first else None,
+            )
             first = False
         changed += 1
 
@@ -835,6 +938,45 @@ def ensure_comments_extensible_content_type(docx_dir: Path):
     )
 
 
+def ensure_people_relationship(docx_dir: Path):
+    return ensure_word_relationship(docx_dir, PEOPLE_REL_TYPE, "people.xml")
+
+
+def ensure_people_content_type(docx_dir: Path):
+    return ensure_word_content_type_override(docx_dir, PEOPLE_PART_NAME, PEOPLE_CONTENT_TYPE)
+
+
+def rewrite_people_part(docx_dir: Path, authors, presence_by_author=None):
+    people_root = ET.Element(f"{{{W15_NS}}}people")
+    for author in sorted({str(a).strip() for a in (authors or []) if str(a).strip()}):
+        person = ET.SubElement(people_root, f"{{{W15_NS}}}person")
+        person.set(f"{{{W15_NS}}}author", author)
+        presence = (presence_by_author or {}).get(author) or {}
+        provider_id = str(presence.get("provider_id") or "").strip()
+        user_id = str(presence.get("user_id") or "").strip()
+        if provider_id or user_id:
+            presence_info = ET.SubElement(person, f"{{{W15_NS}}}presenceInfo")
+            if provider_id:
+                presence_info.set(f"{{{W15_NS}}}providerId", provider_id)
+            if user_id:
+                presence_info.set(f"{{{W15_NS}}}userId", user_id)
+    people_path = docx_dir / "word" / "people.xml"
+    write_xml(ET.ElementTree(people_root), people_path)
+    return True
+
+
+def ensure_comments_xml_state_compatibility(root: ET.Element):
+    changed = False
+    current_ignorable = root.attrib.get(f"{{{MC_NS}}}Ignorable")
+    if current_ignorable is not None:
+        normalized = " ".join([tok for tok in str(current_ignorable).split() if tok])
+        if normalized != current_ignorable:
+            root.set(f"{{{MC_NS}}}Ignorable", normalized)
+            changed = True
+
+    return changed
+
+
 def load_comments_ids_durable_map(docx_dir: Path):
     comments_ids_path = docx_dir / "word" / "commentsIds.xml"
     para_to_durable = {}
@@ -855,7 +997,14 @@ def load_comments_ids_durable_map(docx_dir: Path):
     return para_to_durable, used_durable_ids
 
 
-def rewrite_root_comments_extended_state(docx_dir: Path, root_ids, state_by_id):
+def rewrite_root_comments_extended_state(
+    docx_dir: Path,
+    root_ids,
+    state_by_id,
+    para_by_id=None,
+    durable_by_id=None,
+    presence_by_author=None,
+):
     comments_path = docx_dir / "word" / "comments.xml"
     if not comments_path.exists() or not root_ids:
         return 0
@@ -865,15 +1014,22 @@ def rewrite_root_comments_extended_state(docx_dir: Path, root_ids, state_by_id):
     root_meta_by_id = {}
     root_order = []
     changed_comments_xml = False
+    authors = set()
+
+    if ensure_comments_xml_state_compatibility(root):
+        changed_comments_xml = True
 
     used_para_ids = set()
     for comment in root.findall(f".//{{{W_NS}}}comment"):
+        for attr_name in list(comment.attrib.keys()):
+            if attr_name == "state" or attr_name.endswith("}state"):
+                del comment.attrib[attr_name]
+                changed_comments_xml = True
         para_id = get_attr_local(comment, "paraId")
         if para_id:
             used_para_ids.add(para_id)
-        first_p = comment.find(f".//{{{W_NS}}}p")
-        if first_p is not None:
-            p_para_id = get_attr_local(first_p, "paraId")
+        for p in comment.findall(f"./{{{W_NS}}}p"):
+            p_para_id = get_attr_local(p, "paraId")
             if p_para_id:
                 used_para_ids.add(p_para_id)
 
@@ -883,19 +1039,34 @@ def rewrite_root_comments_extended_state(docx_dir: Path, root_ids, state_by_id):
         cid = get_attr_local(comment, "id")
         if cid is None or cid not in root_set:
             continue
-        first_p = comment.find(f".//{{{W_NS}}}p")
-        if first_p is None:
-            first_p = ET.SubElement(comment, f"{{{W_NS}}}p")
+        paragraphs = comment.findall(f"./{{{W_NS}}}p")
+        if not paragraphs:
+            thread_p = ET.SubElement(comment, f"{{{W_NS}}}p")
             changed_comments_xml = True
+        else:
+            thread_p = paragraphs[-1]
 
-        para_id = get_attr_local(first_p, "paraId") or get_attr_local(comment, "paraId")
+        preferred_para_id = str((para_by_id or {}).get(cid) or "").strip()
+        para_id = get_attr_local(thread_p, "paraId") or get_attr_local(comment, "paraId")
+        if preferred_para_id:
+            if para_id != preferred_para_id:
+                thread_p.set(f"{{{W14_NS}}}paraId", preferred_para_id)
+                changed_comments_xml = True
+            para_id = preferred_para_id
         if not para_id:
             para_id = generate_unique_para_id(f"comment-{cid}", used_para_ids)
-            first_p.set(f"{{{W14_NS}}}paraId", para_id)
+            thread_p.set(f"{{{W14_NS}}}paraId", para_id)
             changed_comments_xml = True
-        durable_id = existing_durable_by_para.get(para_id)
+        else:
+            used_para_ids.add(para_id)
+        durable_id = str((durable_by_id or {}).get(cid) or "").strip() or existing_durable_by_para.get(para_id)
         if not durable_id:
             durable_id = generate_unique_durable_id(f"durable-{para_id}", used_durable_ids)
+        else:
+            used_durable_ids.add(durable_id)
+        author = (get_attr_local(comment, "author") or "").strip()
+        if author:
+            authors.add(author)
         root_meta_by_id[cid] = {
             "para_id": para_id,
             "durable_id": durable_id,
@@ -940,6 +1111,7 @@ def rewrite_root_comments_extended_state(docx_dir: Path, root_ids, state_by_id):
     comments_ext_path = docx_dir / "word" / "commentsExtended.xml"
     comments_ids_path = docx_dir / "word" / "commentsIds.xml"
     comments_extensible_path = docx_dir / "word" / "commentsExtensible.xml"
+    rewrite_people_part(docx_dir, authors, presence_by_author)
     write_xml(ET.ElementTree(comments_ext_root), comments_ext_path)
     write_xml(ET.ElementTree(comments_ids_root), comments_ids_path)
     write_xml(ET.ElementTree(comments_extensible_root), comments_extensible_path)
@@ -948,11 +1120,13 @@ def rewrite_root_comments_extended_state(docx_dir: Path, root_ids, state_by_id):
     rel_changed |= ensure_comments_extended_relationship(docx_dir)
     rel_changed |= ensure_comments_ids_relationship(docx_dir)
     rel_changed |= ensure_comments_extensible_relationship(docx_dir)
+    rel_changed |= ensure_people_relationship(docx_dir)
 
     ct_changed = False
     ct_changed |= ensure_comments_extended_content_type(docx_dir)
     ct_changed |= ensure_comments_ids_content_type(docx_dir)
     ct_changed |= ensure_comments_extensible_content_type(docx_dir)
+    ct_changed |= ensure_people_content_type(docx_dir)
 
     return 1 if (changed_comments_xml or rel_changed or ct_changed or root_order) else 0
 
@@ -1096,6 +1270,24 @@ def extract_comment_text(comment_elem: ET.Element) -> str:
     return "\n".join(paragraphs).strip()
 
 
+def comment_paragraph_para_ids(comment_elem: ET.Element):
+    para_ids = []
+    for p in comment_elem.findall(f"./{{{W_NS}}}p"):
+        para_id = get_attr_local(p, "paraId")
+        if para_id:
+            para_ids.append(para_id)
+    return para_ids
+
+
+def comment_thread_para_id(comment_elem: ET.Element):
+    # Word's commentEx/commentsIds mapping uses the thread paragraph ID,
+    # which for multi-paragraph comments is the last paragraph's paraId.
+    para_ids = comment_paragraph_para_ids(comment_elem)
+    if para_ids:
+        return para_ids[-1]
+    return get_attr_local(comment_elem, "paraId") or ""
+
+
 def parse_docx_comments(docx_dir: Path):
     comments_path = docx_dir / "word" / "comments.xml"
     comments_ext_path = docx_dir / "word" / "commentsExtended.xml"
@@ -1104,6 +1296,7 @@ def parse_docx_comments(docx_dir: Path):
     comments = {}
     parent_map = {}
     para_to_id = {}
+    durable_by_para = {}
     ordered_comment_ids = []
     resolved_by_id = {}
 
@@ -1116,11 +1309,9 @@ def parse_docx_comments(docx_dir: Path):
             author = get_attr_local(comment, "author") or ""
             date = get_attr_local(comment, "date") or ""
             text = extract_comment_text(comment)
-            para_id = get_attr_local(comment, "paraId")
-            if not para_id:
-                first_p = comment.find(f".//{{{W_NS}}}p")
-                if first_p is not None:
-                    para_id = get_attr_local(first_p, "paraId")
+            para_id = comment_thread_para_id(comment)
+            for p_para_id in comment_paragraph_para_ids(comment):
+                para_to_id[p_para_id] = cid
             parent = get_attr_local(comment, "parentId")
             if para_id:
                 para_to_id[para_id] = cid
@@ -1134,6 +1325,7 @@ def parse_docx_comments(docx_dir: Path):
                 "text": text,
                 "order": idx,
                 "para_id": para_id or "",
+                "durable_id": "",
                 "resolved": False,
             }
 
@@ -1146,14 +1338,22 @@ def parse_docx_comments(docx_dir: Path):
             if local_name(elem.tag) != "commentId":
                 continue
             para_id = get_attr_local(elem, "paraId")
+            durable_id = get_attr_local(elem, "durableId")
             if para_id:
                 para_ids_in_order.append(para_id)
+            if para_id and durable_id:
+                durable_by_para[para_id] = durable_id
         if len(para_ids_in_order) == len(ordered_comment_ids):
             for comment_id, para_id in zip(ordered_comment_ids, para_ids_in_order):
                 if para_id and para_id not in para_to_id:
                     para_to_id[para_id] = comment_id
-                if para_id and comment_id in comments and not comments[comment_id].get("para_id"):
+                if para_id and comment_id in comments:
                     comments[comment_id]["para_id"] = para_id
+
+    for cid, meta in comments.items():
+        para_id = (meta.get("para_id") or "").strip()
+        if para_id and para_id in durable_by_para:
+            comments[cid]["durable_id"] = durable_by_para[para_id]
 
     if comments_ext_path.exists() and para_to_id:
         _, root = read_xml(comments_ext_path)
@@ -1169,6 +1369,8 @@ def parse_docx_comments(docx_dir: Path):
                 resolved_by_id[child_id] = is_resolved
                 if child_id in comments:
                     comments[child_id]["resolved"] = is_resolved
+                    if para_id:
+                        comments[child_id]["para_id"] = para_id
             if not para_id or not parent_para_id:
                 continue
             parent_id = para_to_id.get(parent_para_id)
@@ -1186,6 +1388,36 @@ def parse_docx_comments(docx_dir: Path):
         comments[cid]["resolved"] = bool(resolved_by_id.get(cid, False))
 
     return comments, parent_map, children
+
+
+def parse_docx_people_presence(docx_dir: Path):
+    people_path = docx_dir / "word" / "people.xml"
+    presence_by_author = {}
+    if not people_path.exists():
+        return presence_by_author
+
+    _, root = read_xml(people_path)
+    for person in root.iter():
+        if local_name(person.tag) != "person":
+            continue
+        author = (get_attr_local(person, "author") or "").strip()
+        if not author:
+            continue
+        provider_id = ""
+        user_id = ""
+        for child in list(person):
+            if local_name(child.tag) != "presenceInfo":
+                continue
+            provider_id = (get_attr_local(child, "providerId") or "").strip()
+            user_id = (get_attr_local(child, "userId") or "").strip()
+            break
+        if provider_id or user_id:
+            presence_by_author[author] = {
+                "provider_id": provider_id,
+                "user_id": user_id,
+            }
+
+    return presence_by_author
 
 
 def collect_anchors_from_xml(xml_path: Path):
@@ -1331,9 +1563,29 @@ def convert_docx_to_md(in_docx: Path, out_md: Path, pandoc_extra_args):
 
         extract_docx(in_docx, src_dir)
         comments, parent_map, _ = parse_docx_comments(src_dir)
+        people_presence_by_author = parse_docx_people_presence(src_dir)
         state_by_id = {}
+        para_by_id = {}
+        durable_by_id = {}
+        presence_provider_by_id = {}
+        presence_user_by_id = {}
         for cid, meta in comments.items():
             state_by_id[cid] = "resolved" if meta.get("resolved") else "active"
+            para_id = (meta.get("para_id") or "").strip()
+            if para_id:
+                para_by_id[cid] = para_id
+            durable_id = (meta.get("durable_id") or "").strip()
+            if durable_id:
+                durable_by_id[cid] = durable_id
+            author = (meta.get("author") or "").strip()
+            if author:
+                presence = people_presence_by_author.get(author) or {}
+                provider_id = str(presence.get("provider_id") or "").strip()
+                user_id = str(presence.get("user_id") or "").strip()
+                if provider_id:
+                    presence_provider_by_id[cid] = provider_id
+                if user_id:
+                    presence_user_by_id[cid] = user_id
 
         args = ["--track-changes=all"]
         if pandoc_extra_args:
@@ -1347,7 +1599,15 @@ def convert_docx_to_md(in_docx: Path, out_md: Path, pandoc_extra_args):
             extra_args=args,
             cwd=out_md.parent,
         )
-        annotate_markdown_comment_attrs(out_md, parent_map, state_by_id)
+        annotate_markdown_comment_attrs(
+            out_md,
+            parent_map,
+            state_by_id,
+            para_by_id,
+            durable_by_id,
+            presence_provider_by_id,
+            presence_user_by_id,
+        )
         text = out_md.read_text(encoding="utf-8")
         text, _ = repair_unbalanced_comment_markers(text)
         text, _ = normalize_nested_comment_end_markers(text)
@@ -1360,20 +1620,24 @@ def convert_md_to_docx(in_md: Path, out_docx: Path, pandoc_extra_args):
     with tempfile.TemporaryDirectory(prefix=".docx-comments-mdinput-", dir=temp_dir_root_for(in_md)) as tmp:
         tmp_dir = Path(tmp)
         sanitized_md = tmp_dir / "input.md"
+        pandoc_input_md = tmp_dir / "pandoc-input.md"
         text = in_md.read_text(encoding="utf-8")
         text, _ = repair_unbalanced_comment_markers(text)
         text, _ = normalize_nested_comment_end_markers(text)
         cleaned, _ = strip_placeholder_shape_images(text)
         sanitized_md.write_text(cleaned, encoding="utf-8")
 
+        comment_data = extract_comment_texts_from_markdown(sanitized_md, pandoc_extra_args)
+        pandoc_text, _ = strip_comment_transport_attrs(cleaned)
+        pandoc_input_md.write_text(pandoc_text, encoding="utf-8")
+
         run_pandoc(
-            sanitized_md,
+            pandoc_input_md,
             out_docx,
             fmt_from="markdown",
             extra_args=pandoc_extra_args,
             cwd=in_md.parent,
         )
-        comment_data = extract_comment_texts_from_markdown(sanitized_md, pandoc_extra_args)
     if not comment_data or not comment_data.get("flattened_by_id"):
         return
 
@@ -1392,6 +1656,9 @@ def convert_md_to_docx(in_md: Path, out_docx: Path, pandoc_extra_args):
             unpacked,
             comment_data["root_ids"],
             comment_data.get("state_by_id", {}),
+            comment_data.get("para_by_id", {}),
+            comment_data.get("durable_by_id", {}),
+            comment_data.get("presence_by_author", {}),
         )
         if not changed and not pruned and not state_updated:
             return

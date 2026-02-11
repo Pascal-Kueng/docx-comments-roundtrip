@@ -71,6 +71,19 @@ class DocxCommentSnapshot:
     has_comments_ids_content_type: bool
     has_comments_extensible_content_type: bool
     has_people_content_type: bool
+    has_comments_xml_w15_ns: bool
+    has_comments_xml_w14_ns: bool
+    has_comments_xml_w16cid_ns: bool
+    has_comments_xml_w16cex_ns: bool
+    comments_xml_ignorable_tokens: list[str]
+    people_presence_provider_by_author: dict[str, str]
+    people_presence_user_by_author: dict[str, str]
+    first_paragraph_para_by_id: dict[str, str]
+    last_paragraph_para_by_id: dict[str, str]
+    paragraph_count_by_id: dict[str, int]
+    comment_state_attr_by_id: dict[str, str]
+    comment_para_attr_by_id: dict[str, str]
+    comment_durable_attr_by_id: dict[str, str]
     comments_extended_para_ids: list[str]
     comments_extended_parent_para_ids: list[str]
     comments_ids_para_ids: list[str]
@@ -107,6 +120,19 @@ class DocxCommentSnapshot:
             "has_comments_ids_content_type": self.has_comments_ids_content_type,
             "has_comments_extensible_content_type": self.has_comments_extensible_content_type,
             "has_people_content_type": self.has_people_content_type,
+            "has_comments_xml_w15_ns": self.has_comments_xml_w15_ns,
+            "has_comments_xml_w14_ns": self.has_comments_xml_w14_ns,
+            "has_comments_xml_w16cid_ns": self.has_comments_xml_w16cid_ns,
+            "has_comments_xml_w16cex_ns": self.has_comments_xml_w16cex_ns,
+            "comments_xml_ignorable_tokens": self.comments_xml_ignorable_tokens,
+            "people_presence_provider_by_author": self.people_presence_provider_by_author,
+            "people_presence_user_by_author": self.people_presence_user_by_author,
+            "first_paragraph_para_by_id": self.first_paragraph_para_by_id,
+            "last_paragraph_para_by_id": self.last_paragraph_para_by_id,
+            "paragraph_count_by_id": self.paragraph_count_by_id,
+            "comment_state_attr_by_id": self.comment_state_attr_by_id,
+            "comment_para_attr_by_id": self.comment_para_attr_by_id,
+            "comment_durable_attr_by_id": self.comment_durable_attr_by_id,
             "comments_extended_para_ids": self.comments_extended_para_ids,
             "comments_extended_parent_para_ids": self.comments_extended_parent_para_ids,
             "comments_ids_para_ids": self.comments_ids_para_ids,
@@ -234,6 +260,19 @@ def inspect_docx(docx_path: Path) -> DocxCommentSnapshot:
         comments_ids_durable_ids: set[str] = set()
         comments_ids_durable_by_para: dict[str, str] = {}
         comments_extensible_durable_ids: set[str] = set()
+        has_comments_xml_w15_ns = False
+        has_comments_xml_w14_ns = False
+        has_comments_xml_w16cid_ns = False
+        has_comments_xml_w16cex_ns = False
+        comments_xml_ignorable_tokens: list[str] = []
+        people_presence_provider_by_author: dict[str, str] = {}
+        people_presence_user_by_author: dict[str, str] = {}
+        first_paragraph_para_by_id: dict[str, str] = {}
+        last_paragraph_para_by_id: dict[str, str] = {}
+        paragraph_count_by_id: dict[str, int] = {}
+        comment_state_attr_by_id: dict[str, str] = {}
+        comment_para_attr_by_id: dict[str, str] = {}
+        comment_durable_attr_by_id: dict[str, str] = {}
 
         if "word/_rels/document.xml.rels" in names:
             rel_root = ET.fromstring(zip_file.read("word/_rels/document.xml.rels"))
@@ -274,11 +313,36 @@ def inspect_docx(docx_path: Path) -> DocxCommentSnapshot:
             )
 
         if "word/comments.xml" in names:
-            comments_root = ET.fromstring(zip_file.read("word/comments.xml"))
+            comments_xml_raw = zip_file.read("word/comments.xml").decode("utf-8", errors="replace")
+            has_comments_xml_w15_ns = 'xmlns:w15="' in comments_xml_raw
+            has_comments_xml_w14_ns = 'xmlns:w14="' in comments_xml_raw
+            has_comments_xml_w16cid_ns = 'xmlns:w16cid="' in comments_xml_raw
+            has_comments_xml_w16cex_ns = 'xmlns:w16cex="' in comments_xml_raw
+            ignorable_match = re.search(r'\b(?:mc:)?Ignorable="([^"]*)"', comments_xml_raw)
+            if ignorable_match:
+                comments_xml_ignorable_tokens = sorted(
+                    [token for token in (ignorable_match.group(1) or "").split() if token]
+                )
+
+            comments_root = ET.fromstring(comments_xml_raw)
             for idx, comment in enumerate(comments_root.findall(f".//{{{W_NS}}}comment")):
                 cid = get_attr_local(comment, "id")
                 if cid is None:
                     continue
+                comment_state_attr_by_id[cid] = get_attr_local(comment, "state") or ""
+                comment_para_attr_by_id[cid] = get_attr_local(comment, "paraId") or ""
+                comment_durable_attr_by_id[cid] = get_attr_local(comment, "durableId") or ""
+                paragraph_para_ids = []
+                paragraphs = comment.findall(f"./{{{W_NS}}}p")
+                paragraph_count_by_id[cid] = len(paragraphs)
+                for paragraph in paragraphs:
+                    paragraph_para_id = get_attr_local(paragraph, "paraId") or ""
+                    if paragraph_para_id:
+                        paragraph_para_ids.append(paragraph_para_id)
+                        para_to_id[paragraph_para_id] = cid
+                first_paragraph_para_by_id[cid] = paragraph_para_ids[0] if paragraph_para_ids else ""
+                last_paragraph_para_by_id[cid] = paragraph_para_ids[-1] if paragraph_para_ids else ""
+                thread_para_id = paragraph_para_ids[-1] if paragraph_para_ids else ""
                 node = CommentNode(
                     id=cid,
                     author=get_attr_local(comment, "author") or "",
@@ -286,20 +350,8 @@ def inspect_docx(docx_path: Path) -> DocxCommentSnapshot:
                     text=extract_comment_text(comment),
                     order=idx,
                     parent_id=get_attr_local(comment, "parentId") or "",
-                    para_id=get_attr_local(comment, "paraId") or "",
+                    para_id=thread_para_id or (get_attr_local(comment, "paraId") or ""),
                 )
-                if not node.para_id:
-                    first_p = comment.find(f".//{{{W_NS}}}p")
-                    if first_p is not None:
-                        node = CommentNode(
-                            id=node.id,
-                            author=node.author,
-                            date=node.date,
-                            text=node.text,
-                            order=node.order,
-                            parent_id=node.parent_id,
-                            para_id=get_attr_local(first_p, "paraId") or "",
-                        )
                 comments_by_id[cid] = node
                 comment_ids_order.append(cid)
                 if node.parent_id:
@@ -327,6 +379,17 @@ def inspect_docx(docx_path: Path) -> DocxCommentSnapshot:
                 for comment_id, para_id in zip(comment_ids_order, para_ids):
                     if para_id and para_id not in para_to_id:
                         para_to_id[para_id] = comment_id
+                    if para_id and comment_id in comments_by_id:
+                        node = comments_by_id[comment_id]
+                        comments_by_id[comment_id] = CommentNode(
+                            id=node.id,
+                            author=node.author,
+                            date=node.date,
+                            text=node.text,
+                            order=node.order,
+                            parent_id=node.parent_id,
+                            para_id=para_id,
+                        )
 
         if has_comments_extended and para_to_id:
             ext_root = ET.fromstring(zip_file.read("word/commentsExtended.xml"))
@@ -344,6 +407,17 @@ def inspect_docx(docx_path: Path) -> DocxCommentSnapshot:
                 parent_id = para_to_id.get(parent_para or "")
                 if child_id:
                     resolved_by_id[child_id] = str(done or "").strip() == "1"
+                    node = comments_by_id.get(child_id)
+                    if node is not None and child_para:
+                        comments_by_id[child_id] = CommentNode(
+                            id=node.id,
+                            author=node.author,
+                            date=node.date,
+                            text=node.text,
+                            order=node.order,
+                            parent_id=node.parent_id,
+                            para_id=child_para,
+                        )
                 if child_id and parent_id and child_id not in parent_map:
                     parent_map[child_id] = parent_id
 
@@ -355,6 +429,25 @@ def inspect_docx(docx_path: Path) -> DocxCommentSnapshot:
                 durable_id = get_attr_local(elem, "durableId")
                 if durable_id:
                     comments_extensible_durable_ids.add(durable_id)
+
+        if has_people:
+            people_root = ET.fromstring(zip_file.read("word/people.xml"))
+            for person in people_root.iter():
+                if local_name(person.tag) != "person":
+                    continue
+                author = (get_attr_local(person, "author") or "").strip()
+                if not author:
+                    continue
+                provider_id = ""
+                user_id = ""
+                for child in list(person):
+                    if local_name(child.tag) != "presenceInfo":
+                        continue
+                    provider_id = (get_attr_local(child, "providerId") or "").strip()
+                    user_id = (get_attr_local(child, "userId") or "").strip()
+                    break
+                people_presence_provider_by_author[author] = provider_id
+                people_presence_user_by_author[author] = user_id
 
         parent_map = {
             child: parent
@@ -445,6 +538,19 @@ def inspect_docx(docx_path: Path) -> DocxCommentSnapshot:
         has_comments_ids_content_type=has_comments_ids_content_type,
         has_comments_extensible_content_type=has_comments_extensible_content_type,
         has_people_content_type=has_people_content_type,
+        has_comments_xml_w15_ns=has_comments_xml_w15_ns,
+        has_comments_xml_w14_ns=has_comments_xml_w14_ns,
+        has_comments_xml_w16cid_ns=has_comments_xml_w16cid_ns,
+        has_comments_xml_w16cex_ns=has_comments_xml_w16cex_ns,
+        comments_xml_ignorable_tokens=comments_xml_ignorable_tokens,
+        people_presence_provider_by_author=people_presence_provider_by_author,
+        people_presence_user_by_author=people_presence_user_by_author,
+        first_paragraph_para_by_id=first_paragraph_para_by_id,
+        last_paragraph_para_by_id=last_paragraph_para_by_id,
+        paragraph_count_by_id=paragraph_count_by_id,
+        comment_state_attr_by_id=comment_state_attr_by_id,
+        comment_para_attr_by_id=comment_para_attr_by_id,
+        comment_durable_attr_by_id=comment_durable_attr_by_id,
         comments_extended_para_ids=sorted(comments_extended_para_ids),
         comments_extended_parent_para_ids=sorted(comments_extended_parent_para_ids),
         comments_ids_para_ids=sorted(comments_ids_para_ids),

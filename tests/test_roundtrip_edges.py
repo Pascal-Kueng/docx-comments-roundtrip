@@ -267,6 +267,33 @@ class TestEdgeRoundtrips(unittest.TestCase):
                     f"expected={expected_state} actual={actual_state}"
                 )
 
+            seed_node = seed_snapshot.comments_by_id.get(comment_id)
+            roundtrip_node = roundtrip_snapshot.comments_by_id.get(comment_id)
+            if seed_node is not None and roundtrip_node is not None:
+                expected_para_id = (seed_node.para_id or "").strip()
+                actual_para_id = (roundtrip_node.para_id or "").strip()
+                if expected_para_id and actual_para_id and expected_para_id != actual_para_id:
+                    errors.append(
+                        f"Roundtrip paraId drift for id={comment_id}. "
+                        f"expected={expected_para_id} actual={actual_para_id}"
+                    )
+
+                expected_durable_id = (
+                    seed_snapshot.comments_ids_durable_by_para.get(expected_para_id, "").strip()
+                    if expected_para_id
+                    else ""
+                )
+                actual_durable_id = (
+                    roundtrip_snapshot.comments_ids_durable_by_para.get(actual_para_id, "").strip()
+                    if actual_para_id
+                    else ""
+                )
+                if expected_durable_id and actual_durable_id and expected_durable_id != actual_durable_id:
+                    errors.append(
+                        f"Roundtrip durableId drift for id={comment_id}. "
+                        f"expected={expected_durable_id} actual={actual_durable_id}"
+                    )
+
         expected_resolved_root_ids = sorted(
             [
                 cid
@@ -276,6 +303,16 @@ class TestEdgeRoundtrips(unittest.TestCase):
             key=lambda value: (len(value), value),
         )
         if expected_resolved_root_ids:
+            expected_resolved_count = len(expected_resolved_root_ids)
+            actual_resolved_count = len(
+                [cid for cid in seed_snapshot.comment_ids_order if bool(roundtrip_snapshot.resolved_by_id.get(cid, False))]
+            )
+            if actual_resolved_count != expected_resolved_count:
+                errors.append(
+                    "Resolved root-count mismatch after roundtrip: "
+                    f"expected={expected_resolved_count} actual={actual_resolved_count}"
+                )
+
             required_flags = [
                 ("word/commentsExtended.xml", roundtrip_snapshot.has_comments_extended),
                 ("word/commentsIds.xml", roundtrip_snapshot.has_comments_ids),
@@ -293,19 +330,111 @@ class TestEdgeRoundtrips(unittest.TestCase):
                     roundtrip_snapshot.has_comments_extensible_content_type,
                 ),
             ]
+            if seed_snapshot.has_people or seed_snapshot.has_people_rel or seed_snapshot.has_people_content_type:
+                required_flags.extend(
+                    [
+                        ("word/people.xml", roundtrip_snapshot.has_people),
+                        ("document.xml.rels people relationship", roundtrip_snapshot.has_people_rel),
+                        ("[Content_Types].xml people override", roundtrip_snapshot.has_people_content_type),
+                    ]
+                )
+
             for label, present in required_flags:
                 if not present:
                     errors.append(f"Roundtrip missing state-supporting package component: {label}")
 
+            if seed_snapshot.has_people:
+                expected_root_authors = sorted(
+                    {
+                        (seed_snapshot.comments_by_id.get(cid).author or "").strip()
+                        for cid in seed_snapshot.comment_ids_order
+                        if seed_snapshot.comments_by_id.get(cid)
+                    }
+                )
+                expected_root_authors = [author for author in expected_root_authors if author]
+                for author in expected_root_authors:
+                    expected_provider = (seed_snapshot.people_presence_provider_by_author.get(author) or "").strip()
+                    expected_user = (seed_snapshot.people_presence_user_by_author.get(author) or "").strip()
+                    if not (expected_provider or expected_user):
+                        continue
+                    actual_provider = (roundtrip_snapshot.people_presence_provider_by_author.get(author) or "").strip()
+                    actual_user = (roundtrip_snapshot.people_presence_user_by_author.get(author) or "").strip()
+                    if not actual_provider or not actual_user:
+                        errors.append(
+                            "Roundtrip missing people.xml presenceInfo for author "
+                            f"'{author}' required for Word-compatible resolved state."
+                        )
+                        continue
+                    if actual_provider != expected_provider or actual_user != expected_user:
+                        errors.append(
+                            "Roundtrip people.xml presenceInfo mismatch for author "
+                            f"'{author}': expected provider/user=({expected_provider}, {expected_user}) "
+                            f"actual=({actual_provider}, {actual_user})"
+                        )
+
+            introduced_state_attr_ids = sorted(
+                [
+                    cid
+                    for cid in seed_snapshot.comment_ids_order
+                    if not (seed_snapshot.comment_state_attr_by_id.get(cid) or "").strip()
+                    and (roundtrip_snapshot.comment_state_attr_by_id.get(cid) or "").strip()
+                ],
+                key=lambda value: (len(value), value),
+            )
+            if introduced_state_attr_ids:
+                errors.append(
+                    "Roundtrip introduced unsupported comments.xml state attributes on roots: "
+                    f"{introduced_state_attr_ids}"
+                )
+
+            introduced_para_attr_ids = sorted(
+                [
+                    cid
+                    for cid in seed_snapshot.comment_ids_order
+                    if not (seed_snapshot.comment_para_attr_by_id.get(cid) or "").strip()
+                    and (roundtrip_snapshot.comment_para_attr_by_id.get(cid) or "").strip()
+                ],
+                key=lambda value: (len(value), value),
+            )
+            if introduced_para_attr_ids:
+                errors.append(
+                    "Roundtrip introduced unsupported comments.xml paraId attributes on roots: "
+                    f"{introduced_para_attr_ids}"
+                )
+
+            introduced_durable_attr_ids = sorted(
+                [
+                    cid
+                    for cid in seed_snapshot.comment_ids_order
+                    if not (seed_snapshot.comment_durable_attr_by_id.get(cid) or "").strip()
+                    and (roundtrip_snapshot.comment_durable_attr_by_id.get(cid) or "").strip()
+                ],
+                key=lambda value: (len(value), value),
+            )
+            if introduced_durable_attr_ids:
+                errors.append(
+                    "Roundtrip introduced unsupported comments.xml durableId attributes on roots: "
+                    f"{introduced_durable_attr_ids}"
+                )
+
             root_para_ids = set()
             missing_root_para_ids = []
+            thread_para_mismatch_ids = []
             for cid in seed_snapshot.comment_ids_order:
                 node = roundtrip_snapshot.comments_by_id.get(cid)
                 para_id = node.para_id if node else ""
+                last_para_id = (roundtrip_snapshot.last_paragraph_para_by_id.get(cid, "") or "").strip()
+                if roundtrip_snapshot.paragraph_count_by_id.get(cid, 0) > 1 and last_para_id and para_id != last_para_id:
+                    thread_para_mismatch_ids.append(cid)
                 if not para_id:
                     missing_root_para_ids.append(cid)
                     continue
                 root_para_ids.add(para_id)
+            if thread_para_mismatch_ids:
+                errors.append(
+                    "Roundtrip thread paraId must match last paragraph paraId for multi-paragraph comments: "
+                    f"{sorted(thread_para_mismatch_ids, key=lambda value: (len(value), value))}"
+                )
             if missing_root_para_ids:
                 errors.append(
                     "Roundtrip roots missing paraId mapping required for Word state resolution: "
