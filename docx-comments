@@ -57,6 +57,7 @@ INLINE_IMAGE_RE = re.compile(
     re.DOTALL,
 )
 IMAGE_LINK_RE = re.compile(r'!\[[^\]]*\]\((?P<src>[^)\s]+)(?:\s+"[^"]*")?\)', re.DOTALL)
+MIN_PANDOC_VERSION = (2, 14)
 
 
 def local_name(tag: str) -> str:
@@ -121,6 +122,210 @@ def parse_state_token(state_value):
     return "active"
 
 
+def resolve_pandoc_writer_format(extra_args, default_format="markdown"):
+    args = list(extra_args or [])
+    writer = default_format
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg in {"-t", "--to"} and i + 1 < len(args):
+            writer = args[i + 1]
+            i += 2
+            continue
+        if arg.startswith("--to="):
+            writer = arg.split("=", 1)[1]
+        i += 1
+    return writer or default_format
+
+
+def pandoc_args_for_json_markdown_render(extra_args):
+    args = list(extra_args or [])
+    out = []
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg in {"-f", "--from", "-t", "--to", "-o", "--output", "--extract-media", "--track-changes"}:
+            i += 2
+            continue
+        if (
+            arg.startswith("--from=")
+            or arg.startswith("--to=")
+            or arg.startswith("--output=")
+            or arg.startswith("--extract-media=")
+            or arg.startswith("--track-changes=")
+        ):
+            i += 1
+            continue
+        out.append(arg)
+        i += 1
+    return out
+
+
+def ensure_attr_pair(kvs, key: str, value: str):
+    for item in kvs:
+        if isinstance(item, list) and len(item) == 2 and item[0] == key:
+            if item[1]:
+                return False
+            item[1] = value
+            return True
+    kvs.append([key, value])
+    return True
+
+
+def remove_attr_pairs(kvs, keys):
+    kept = []
+    removed = False
+    for item in kvs:
+        if isinstance(item, list) and len(item) == 2 and item[0] in keys:
+            removed = True
+            continue
+        kept.append(item)
+    if removed:
+        kvs[:] = kept
+    return removed
+
+
+def normalize_comment_span_id_attr(attr, classes, kvs):
+    if "comment-start" not in classes and "comment-end" not in classes:
+        return False
+    identifier = str(attr[0] or "").strip()
+    if not identifier:
+        return False
+    changed = False
+    has_id = False
+    for item in kvs:
+        if isinstance(item, list) and len(item) == 2 and item[0] == "id":
+            has_id = True
+            if not item[1]:
+                item[1] = identifier
+                changed = True
+            break
+    if not has_id:
+        kvs.insert(0, ["id", identifier])
+        changed = True
+    if attr[0] != "":
+        attr[0] = ""
+        changed = True
+    return changed
+
+
+def walk_pandoc_spans(doc, span_handler):
+    changed = 0
+
+    def walk_inlines(inlines):
+        nonlocal changed
+        for node in inlines or []:
+            if not isinstance(node, dict):
+                continue
+            t = node.get("t")
+            c = node.get("c")
+            if t == "Span" and isinstance(c, list) and len(c) == 2:
+                attr = c[0] if isinstance(c[0], list) else None
+                if attr is not None and span_handler(attr):
+                    changed += 1
+                nested = c[1] if isinstance(c[1], list) else []
+                walk_inlines(nested)
+                continue
+            if t in {"Para", "Plain"} and isinstance(c, list):
+                walk_inlines(c)
+                continue
+            if t == "Header" and isinstance(c, list) and len(c) >= 3 and isinstance(c[2], list):
+                walk_inlines(c[2])
+                continue
+            if t == "BlockQuote" and isinstance(c, list):
+                walk_blocks(c)
+                continue
+            if t in {"BulletList", "OrderedList"} and isinstance(c, list):
+                items = c if t == "BulletList" else (c[1] if len(c) > 1 else [])
+                for item in items:
+                    walk_blocks(item)
+                continue
+            if t == "DefinitionList" and isinstance(c, list):
+                for term, defs in c:
+                    walk_inlines(term)
+                    for d in defs:
+                        walk_blocks(d)
+                continue
+            if t == "Div" and isinstance(c, list) and len(c) == 2 and isinstance(c[1], list):
+                walk_blocks(c[1])
+                continue
+            if t in {"Link", "Image"} and isinstance(c, list) and len(c) >= 2 and isinstance(c[1], list):
+                walk_inlines(c[1])
+                continue
+            if isinstance(c, list):
+                for item in c:
+                    if isinstance(item, dict):
+                        walk_blocks([item])
+                    elif isinstance(item, list):
+                        walk_inlines(item)
+
+    def walk_blocks(blocks):
+        for block in blocks or []:
+            if not isinstance(block, dict):
+                continue
+            t = block.get("t")
+            c = block.get("c")
+            if t in {"Para", "Plain"} and isinstance(c, list):
+                walk_inlines(c)
+                continue
+            if t == "Header" and isinstance(c, list) and len(c) >= 3 and isinstance(c[2], list):
+                walk_inlines(c[2])
+                continue
+            if t == "BlockQuote" and isinstance(c, list):
+                walk_blocks(c)
+                continue
+            if t in {"BulletList", "OrderedList"} and isinstance(c, list):
+                items = c if t == "BulletList" else (c[1] if len(c) > 1 else [])
+                for item in items:
+                    walk_blocks(item)
+                continue
+            if t == "DefinitionList" and isinstance(c, list):
+                for term, defs in c:
+                    walk_inlines(term)
+                    for d in defs:
+                        walk_blocks(d)
+                continue
+            if t == "Div" and isinstance(c, list) and len(c) == 2 and isinstance(c[1], list):
+                walk_blocks(c[1])
+                continue
+            if t == "Table" and isinstance(c, list):
+                for item in c:
+                    if isinstance(item, list):
+                        walk_blocks([x for x in item if isinstance(x, dict)])
+                continue
+            if isinstance(c, list):
+                for item in c:
+                    if isinstance(item, dict):
+                        walk_blocks([item])
+                    elif isinstance(item, list):
+                        walk_blocks([x for x in item if isinstance(x, dict)])
+
+    walk_blocks(doc.get("blocks", []))
+    return changed
+
+
+def render_pandoc_json_to_markdown(
+    doc,
+    out_path: Path,
+    writer_format="markdown",
+    extra_args=None,
+    cwd=None,
+):
+    with tempfile.TemporaryDirectory(prefix=".docx-comments-json-", dir=temp_dir_root_for(out_path)) as tmp:
+        tmp_dir = Path(tmp)
+        json_in = tmp_dir / "ast.json"
+        json_in.write_text(json.dumps(doc, ensure_ascii=False), encoding="utf-8")
+        render_args = pandoc_args_for_json_markdown_render(extra_args)
+        run_pandoc(
+            json_in,
+            out_path,
+            fmt_from="json",
+            fmt_to=writer_format or "markdown",
+            extra_args=render_args,
+            cwd=cwd,
+        )
+
+
 def annotate_markdown_comment_attrs(
     md_path: Path,
     parent_map,
@@ -129,6 +334,9 @@ def annotate_markdown_comment_attrs(
     durable_by_id=None,
     presence_provider_by_id=None,
     presence_user_by_id=None,
+    pandoc_extra_args=None,
+    writer_format="markdown",
+    cwd=None,
 ):
     if (
         not parent_map
@@ -139,45 +347,84 @@ def annotate_markdown_comment_attrs(
         and not presence_user_by_id
     ):
         return 0
-    text = md_path.read_text(encoding="utf-8")
-    changed = 0
+    doc = run_pandoc_json(md_path, fmt_from="markdown", extra_args=pandoc_extra_args)
 
-    def repl(match):
-        nonlocal changed
-        attrs = match.group("attrs")
-        kv = {k: v for k, v in KV_ATTR_RE.findall(attrs)}
-        cid = kv.get("id")
+    def on_span(attr):
+        if not (isinstance(attr, list) and len(attr) == 3):
+            return False
+        classes = attr[1] if isinstance(attr[1], list) else []
+        kvs = attr[2] if isinstance(attr[2], list) else []
+        changed_here = normalize_comment_span_id_attr(attr, classes, kvs)
+        identifier = str(attr[0] or "").strip()
+        if "comment-start" not in classes:
+            return changed_here
+        kv = {}
+        for item in kvs:
+            if isinstance(item, list) and len(item) == 2:
+                kv[item[0]] = item[1]
+        cid = identifier or str(kv.get("id") or "").strip()
         if not cid:
-            return match.group(0)
-        additions = []
-        pid = parent_map.get(cid)
-        if pid and not kv.get("parent"):
-            additions.append(f' parent="{pid}"')
+            return changed_here
 
+        pid = (parent_map or {}).get(cid)
+        if pid and not kv.get("parent"):
+            changed_here = ensure_attr_pair(kvs, "parent", str(pid)) or changed_here
         if not kv.get("state"):
             state_token = parse_state_token((state_by_id or {}).get(cid))
-            additions.append(f' state="{state_token}"')
+            changed_here = ensure_attr_pair(kvs, "state", state_token) or changed_here
         para_id = (para_by_id or {}).get(cid)
         if para_id and not kv.get("paraId"):
-            additions.append(f' paraId="{para_id}"')
+            changed_here = ensure_attr_pair(kvs, "paraId", str(para_id)) or changed_here
         durable_id = (durable_by_id or {}).get(cid)
         if durable_id and not kv.get("durableId"):
-            additions.append(f' durableId="{durable_id}"')
+            changed_here = ensure_attr_pair(kvs, "durableId", str(durable_id)) or changed_here
         presence_provider = (presence_provider_by_id or {}).get(cid)
         if presence_provider and not kv.get("presenceProvider"):
-            additions.append(f' presenceProvider="{presence_provider}"')
+            changed_here = ensure_attr_pair(kvs, "presenceProvider", str(presence_provider)) or changed_here
         presence_user = (presence_user_by_id or {}).get(cid)
         if presence_user and not kv.get("presenceUserId"):
-            additions.append(f' presenceUserId="{presence_user}"')
+            changed_here = ensure_attr_pair(kvs, "presenceUserId", str(presence_user)) or changed_here
+        return changed_here
 
-        if not additions:
-            return match.group(0)
-        changed += 1
-        return "{.comment-start" + attrs + "".join(additions) + "}"
-
-    updated = COMMENT_START_ATTR_BLOCK_RE.sub(repl, text)
+    changed = walk_pandoc_spans(doc, on_span)
     if changed:
-        md_path.write_text(updated, encoding="utf-8")
+        render_pandoc_json_to_markdown(
+            doc,
+            md_path,
+            writer_format=writer_format,
+            extra_args=pandoc_extra_args,
+            cwd=cwd,
+        )
+    return changed
+
+
+def strip_comment_transport_attrs_ast(
+    md_path: Path,
+    out_md_path: Path,
+    pandoc_extra_args=None,
+    writer_format="markdown",
+    cwd=None,
+):
+    doc = run_pandoc_json(md_path, fmt_from="markdown", extra_args=pandoc_extra_args)
+
+    def on_span(attr):
+        if not (isinstance(attr, list) and len(attr) == 3):
+            return False
+        classes = attr[1] if isinstance(attr[1], list) else []
+        kvs = attr[2] if isinstance(attr[2], list) else []
+        changed_here = normalize_comment_span_id_attr(attr, classes, kvs)
+        if "comment-start" not in classes:
+            return changed_here
+        return remove_attr_pairs(kvs, {"paraId", "durableId", "presenceProvider", "presenceUserId"}) or changed_here
+
+    changed = walk_pandoc_spans(doc, on_span)
+    render_pandoc_json_to_markdown(
+        doc,
+        out_md_path,
+        writer_format=writer_format,
+        extra_args=pandoc_extra_args,
+        cwd=cwd,
+    )
     return changed
 
 
@@ -1599,6 +1846,7 @@ def convert_docx_to_md(in_docx: Path, out_md: Path, pandoc_extra_args):
             extra_args=args,
             cwd=out_md.parent,
         )
+        md_writer = resolve_pandoc_writer_format(pandoc_extra_args, default_format="markdown")
         annotate_markdown_comment_attrs(
             out_md,
             parent_map,
@@ -1607,6 +1855,9 @@ def convert_docx_to_md(in_docx: Path, out_md: Path, pandoc_extra_args):
             durable_by_id,
             presence_provider_by_id,
             presence_user_by_id,
+            pandoc_extra_args=pandoc_extra_args,
+            writer_format=md_writer,
+            cwd=out_md.parent,
         )
         text = out_md.read_text(encoding="utf-8")
         text, _ = repair_unbalanced_comment_markers(text)
@@ -1628,7 +1879,16 @@ def convert_md_to_docx(in_md: Path, out_docx: Path, pandoc_extra_args):
         sanitized_md.write_text(cleaned, encoding="utf-8")
 
         comment_data = extract_comment_texts_from_markdown(sanitized_md, pandoc_extra_args)
-        pandoc_text, _ = strip_comment_transport_attrs(cleaned)
+        strip_comment_transport_attrs_ast(
+            sanitized_md,
+            pandoc_input_md,
+            pandoc_extra_args=pandoc_extra_args,
+            writer_format="markdown",
+            cwd=in_md.parent,
+        )
+        pandoc_text = pandoc_input_md.read_text(encoding="utf-8")
+        pandoc_text, _ = repair_unbalanced_comment_markers(pandoc_text)
+        pandoc_text, _ = normalize_nested_comment_end_markers(pandoc_text)
         pandoc_input_md.write_text(pandoc_text, encoding="utf-8")
 
         run_pandoc(
@@ -1710,11 +1970,46 @@ def build_parser():
     return parser
 
 
+def parse_pandoc_version(version_output: str):
+    lines = (version_output or "").splitlines()
+    first_line = lines[0] if lines else ""
+    m = re.search(r"\b(\d+)\.(\d+)(?:\.(\d+))?", first_line)
+    if not m:
+        return None
+    major = int(m.group(1))
+    minor = int(m.group(2))
+    patch = int(m.group(3) or 0)
+    return (major, minor, patch)
+
+
+def check_prerequisites():
+    pandoc_bin = shutil.which("pandoc")
+    if pandoc_bin is None:
+        raise RuntimeError("pandoc is not installed or not on PATH.")
+
+    proc = subprocess.run([pandoc_bin, "--version"], capture_output=True, text=True, check=False)
+    if proc.returncode != 0:
+        raise RuntimeError(f"failed to run pandoc --version (exit {proc.returncode}).")
+
+    version = parse_pandoc_version(proc.stdout)
+    if version is None:
+        raise RuntimeError("could not parse pandoc version output.")
+
+    minimum = MIN_PANDOC_VERSION + (0,)
+    if version < minimum:
+        current = ".".join(str(x) for x in version)
+        required = ".".join(str(x) for x in minimum[:2])
+        raise RuntimeError(
+            f"pandoc version {current} is too old; require at least {required}."
+        )
+
+
 def main():
     parser = build_parser()
     args, pandoc_extra_args = parser.parse_known_args(normalize_argv(sys.argv[1:]))
 
     try:
+        check_prerequisites()
         mode = args.mode
         if mode == "auto":
             mode = detect_mode_from_path(args.input)
