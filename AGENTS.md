@@ -52,11 +52,10 @@ Additionally accepted on md->docx input:
   - numeric aliases: `///C1.START///` / `///C1.END///`
   - whitespace-tolerant variants: `/// c1 . start ///`
   - legacy `DC_COMMENT(c1.s)` and `{[c1.s]}` forms are accepted on input for backward compatibility only
-- In docx->md output, each root/thread comment also gets a `.comment-card` Div inserted directly after the block that contains its root end marker (not batched at document end).
-- Only root comments keep inline milestone markers in prose; reply comments are carried via nested cards under the root card.
-- Nested reply cards use `.comment-card .comment-reply-card` and preserve `parent` metadata.
+- In docx->md output, each root/thread comment also gets a `CARD_START` marker inserted directly after the block that contains its root end marker (not batched at document end):
+  - `<!--CARD_START{#<id> "author":"...","date":"...","state":"...","parent":"..."}-->`
 - Card body format is intentionally human-readable: blockquote callout header (`[!COMMENT <id>: <author> (<state>)]`) followed by comment body text.
-- Roundtrip-only transport fields are stored in a hidden JSON HTML comment inside each card (`<!--{...}-->`); parser also accepts legacy `<!--DC_META {...}-->`.
+- Only root comments keep inline milestone markers in prose; reply comments are represented as additional `CARD_START` records with `parent` metadata.
 - These are AST-normalized to canonical span markers before extraction.
 
 Internal transport metadata (docx->md->docx only; must be stripped before pandoc md->docx):

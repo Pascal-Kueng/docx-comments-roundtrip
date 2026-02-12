@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import runpy
 import shutil
 import tempfile
@@ -192,16 +193,18 @@ class TestMarkdownAttrTransforms(unittest.TestCase):
 
         doc = run_pandoc_json(md_path, fmt_from="markdown", extra_args=None)
         blocks = [b for b in doc.get("blocks", []) if isinstance(b, dict)]
-        self.assertGreaterEqual(len(blocks), 3)
+        self.assertGreaterEqual(len(blocks), 4)
         self.assertEqual(blocks[0].get("t"), "Para")
-        self.assertEqual(blocks[1].get("t"), "Div")
-        self.assertEqual(blocks[2].get("t"), "Para")
-        div_attr = blocks[1].get("c", [[], []])[0]
-        self.assertEqual(div_attr[0], "c1")
-        self.assertIn("comment-card", div_attr[1])
+        self.assertEqual(blocks[1].get("t"), "RawBlock")
+        self.assertEqual(blocks[2].get("t"), "BlockQuote")
+        self.assertEqual(blocks[3].get("t"), "Para")
+        raw_payload = blocks[1].get("c", ["", ""])[1]
+        self.assertIn("CARD_START{#c1", raw_payload)
         rendered = md_path.read_text(encoding="utf-8")
         self.assertIn("!COMMENT c1: Alice (active)", rendered)
-        self.assertIn('<!--{"author":"Alice","date":"2026-01-01T00:00:00Z","state":"active"}-->', rendered)
+        self.assertIn('<!--CARD_START{#c1 "author":"Alice","date":"2026-01-01T00:00:00Z","state":"active"}-->', rendered)
+        self.assertRegex(rendered, r'<!--CARD_START\{#c1[^}]*\}-->\n> \[!COMMENT c1: Alice \(active\)\]')
+        self.assertNotRegex(rendered, r'> \[!COMMENT c1: Alice \(active\)\]\n>[ \t]*\n> ')
 
     def test_reply_markers_move_to_cards_only(self) -> None:
         emit_cards = self.converter_mod["emit_milestones_and_cards_ast"]
@@ -251,7 +254,7 @@ class TestMarkdownAttrTransforms(unittest.TestCase):
         self.assertIn("///c1.END///", emitted)
         self.assertNotIn("///c2.START///", emitted)
         self.assertNotIn("///c2.END///", emitted)
-        self.assertIn('{#c2 .comment-card .comment-reply-card', emitted)
+        self.assertIn('<!--CARD_START{#c2 "author":"Bob","date":"2026-01-01T01:00:00Z","parent":"c1","state":"active"}-->', emitted)
 
         replaced, card_by_id = normalize_tokens(
             md_path,
@@ -303,7 +306,7 @@ class TestMarkdownAttrTransforms(unittest.TestCase):
 
         output = md_path.read_text(encoding="utf-8")
         end_pos = output.find("///c1.END///")
-        card_pos = output.find("{#c1 .comment-card")
+        card_pos = output.find("CARD_START{#c1")
         self.assertNotEqual(end_pos, -1)
         self.assertNotEqual(card_pos, -1)
         self.assertLess(end_pos, card_pos)

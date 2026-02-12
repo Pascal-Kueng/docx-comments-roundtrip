@@ -8,7 +8,10 @@ from pathlib import Path
 
 COMMENT_START_RE = re.compile(r"\{\.comment-start(?P<attrs>[^}]*)\}", re.DOTALL)
 KV_ATTR_RE = re.compile(r'([A-Za-z_:][-A-Za-z0-9_:.]*)="([^"]*)"')
-CARD_HIDDEN_META_RE = re.compile(r"<!--\s*(?:DC_META\s*)?(\{.*?\})\s*-->", re.DOTALL)
+CARD_START_BLOCK_RE = re.compile(
+    r"<!--\s*CARD_START\s*\{\s*#(?P<id>[A-Za-z0-9][A-Za-z0-9_-]*)\s*(?P<attrs>.*?)\}\s*-->",
+    re.DOTALL,
+)
 INLINE_IMAGE_RE = re.compile(
     r'!\[(?P<alt>[^\]]*)\]\((?P<src>[^)\s]+)(?:\s+"(?P<title>[^"]*)")?\)\{(?P<attrs>[^}]*)\}',
     re.DOTALL,
@@ -47,6 +50,26 @@ def milestone_match_id_edge(match: re.Match) -> tuple[str, str]:
         or ""
     )
     return comment_id, normalize_milestone_edge(edge_token)
+
+
+def parse_card_start_marker(raw_html: str) -> tuple[str, dict[str, str]]:
+    match = CARD_START_BLOCK_RE.search(raw_html or "")
+    if not match:
+        return "", {}
+    comment_id = str(match.group("id") or "").strip()
+    attrs_raw = str(match.group("attrs") or "").strip()
+    meta: dict[str, str] = {}
+    if attrs_raw:
+        try:
+            payload = json.loads("{" + attrs_raw + "}")
+        except json.JSONDecodeError:
+            payload = {}
+        if isinstance(payload, dict):
+            for key, value in payload.items():
+                key_str = str(key or "").strip()
+                if key_str:
+                    meta[key_str] = str(value or "").strip()
+    return comment_id, meta
 
 
 @dataclass(frozen=True)
@@ -203,78 +226,42 @@ def inspect_markdown_comments(markdown_path: Path) -> MarkdownCommentSnapshot:
     card_by_id: dict[str, dict[str, str]] = {}
     start_order = 0
 
-    def extract_hidden_meta(blocks) -> dict[str, str]:
-        meta: dict[str, str] = {}
-        for block in blocks or []:
-            if not isinstance(block, dict):
-                continue
-            t = block.get("t")
-            c = block.get("c")
-            if t == "RawBlock" and isinstance(c, list) and len(c) == 2:
-                fmt = str(c[0] or "").strip().lower()
-                raw = str(c[1] or "")
-                if fmt == "html":
-                    match = CARD_HIDDEN_META_RE.search(raw)
-                    if match:
-                        try:
-                            payload = json.loads(match.group(1))
-                        except json.JSONDecodeError:
-                            payload = {}
-                        if isinstance(payload, dict):
-                            for key, value in payload.items():
-                                key_str = str(key or "").strip()
-                                if key_str:
-                                    meta[key_str] = str(value or "").strip()
-                continue
-            if t == "Div" and isinstance(c, list) and len(c) == 2 and isinstance(c[1], list):
-                attr = c[0] if isinstance(c[0], list) else None
-                classes = attr[1] if isinstance(attr, list) and len(attr) == 3 and isinstance(attr[1], list) else []
-                if "comment-card" in classes:
-                    continue
-                nested = extract_hidden_meta(c[1])
-                if nested:
-                    meta.update(nested)
-        return meta
-
     def extract_comment_card_text(blocks) -> str:
         parts = []
-        def is_display_line(text: str) -> bool:
+
+        def normalize_card_line(text: str) -> str:
             line = str(text or "").strip()
             if not line:
-                return False
+                return ""
+            if line.startswith("[!COMMENT ") and "]" in line:
+                tail = line.split("]", 1)[1].strip()
+                return tail
             if line.startswith("[!COMMENT ") and line.endswith("]"):
-                return True
+                return ""
             if line.startswith("COMMENT ") and ":" in line and line.endswith(")"):
-                return True
-            return False
+                return ""
+            return line
+
         for block in blocks or []:
             if not isinstance(block, dict):
                 continue
             t = block.get("t")
             c = block.get("c")
             if t in {"Para", "Plain"} and isinstance(c, list):
-                text = inlines_to_text(c)
-                if text and not is_display_line(text):
+                text = normalize_card_line(inlines_to_text(c))
+                if text:
                     parts.append(text)
             elif t == "Header" and isinstance(c, list) and len(c) >= 3 and isinstance(c[2], list):
                 text = inlines_to_text(c[2])
                 if text:
                     parts.append(text)
             elif t == "RawBlock" and isinstance(c, list) and len(c) == 2:
-                fmt = str(c[0] or "").strip().lower()
-                raw = str(c[1] or "")
-                if fmt == "html" and CARD_HIDDEN_META_RE.search(raw):
-                    continue
+                continue
             elif t == "BlockQuote" and isinstance(c, list):
                 nested = extract_comment_card_text(c)
                 if nested:
                     parts.append(nested)
             elif t == "Div" and isinstance(c, list) and len(c) == 2 and isinstance(c[1], list):
-                attr = c[0] if isinstance(c[0], list) else None
-                classes = attr[1] if isinstance(attr, list) and len(attr) == 3 and isinstance(attr[1], list) else []
-                if "comment-card" in classes:
-                    # Nested reply cards belong to separate comments.
-                    continue
                 nested = extract_comment_card_text(c[1])
                 if nested:
                     parts.append(nested)
@@ -426,27 +413,6 @@ def inspect_markdown_comments(markdown_path: Path) -> MarkdownCommentSnapshot:
                 walk_blocks(c)
                 continue
             if t == "Div" and isinstance(c, list) and len(c) == 2 and isinstance(c[1], list):
-                attr = c[0] if isinstance(c[0], list) else None
-                if isinstance(attr, list) and len(attr) == 3:
-                    classes = attr[1] if isinstance(attr[1], list) else []
-                    if "comment-card" in classes:
-                        comment_id = str(attr[0] or "").strip()
-                        kvs = attr[2] if isinstance(attr[2], list) else []
-                        meta = {}
-                        for item in kvs:
-                            if isinstance(item, list) and len(item) == 2 and isinstance(item[0], str):
-                                meta[item[0]] = item[1]
-                        hidden_meta = extract_hidden_meta(c[1])
-                        merged_meta = dict(hidden_meta)
-                        merged_meta.update({k: v for k, v in meta.items() if str(v or "").strip()})
-                        if comment_id:
-                            card_by_id[comment_id] = {
-                                "author": str(merged_meta.get("author") or "").strip(),
-                                "date": str(merged_meta.get("date") or "").strip(),
-                                "parent": str(merged_meta.get("parent") or "").strip(),
-                                "state": normalize_state_token(merged_meta.get("state") or ""),
-                                "text": extract_comment_card_text(c[1]),
-                            }
                 walk_blocks(c[1])
                 continue
             if t in {"BulletList", "OrderedList"} and isinstance(c, list):
@@ -462,46 +428,50 @@ def inspect_markdown_comments(markdown_path: Path) -> MarkdownCommentSnapshot:
                         walk_blocks([x for x in item if isinstance(x, dict)])
 
     def collect_cards(blocks) -> None:
-        for block in blocks or []:
+        idx = 0
+        while idx < len(blocks or []):
+            block = blocks[idx]
             if not isinstance(block, dict):
+                idx += 1
                 continue
-            if block.get("t") != "Div":
-                c = block.get("c")
-                if isinstance(c, list):
-                    for item in c:
-                        if isinstance(item, list):
-                            collect_cards([x for x in item if isinstance(x, dict)])
-                        elif isinstance(item, dict):
-                            collect_cards([item])
-                continue
+            t = block.get("t")
             c = block.get("c")
-            if not (isinstance(c, list) and len(c) == 2 and isinstance(c[1], list)):
-                continue
-            attr = c[0] if isinstance(c[0], list) else None
-            if not (isinstance(attr, list) and len(attr) == 3):
-                continue
-            classes = attr[1] if isinstance(attr[1], list) else []
-            if "comment-card" not in classes:
+            if t == "RawBlock" and isinstance(c, list) and len(c) == 2:
+                fmt = str(c[0] or "").strip().lower()
+                raw = str(c[1] or "")
+                comment_id, meta = parse_card_start_marker(raw) if fmt == "html" else ("", {})
+                if comment_id:
+                    quote_blocks = []
+                    if idx + 1 < len(blocks or []):
+                        nxt = blocks[idx + 1]
+                        if isinstance(nxt, dict) and nxt.get("t") == "BlockQuote":
+                            qb = nxt.get("c")
+                            quote_blocks = qb if isinstance(qb, list) else []
+                            idx += 1
+                    card_by_id[comment_id] = {
+                        "author": str(meta.get("author") or "").strip(),
+                        "date": str(meta.get("date") or "").strip(),
+                        "parent": str(meta.get("parent") or "").strip(),
+                        "state": normalize_state_token(meta.get("state") or ""),
+                        "text": extract_comment_card_text(quote_blocks),
+                    }
+                    idx += 1
+                    continue
+            if t == "Div" and isinstance(c, list) and len(c) == 2 and isinstance(c[1], list):
                 collect_cards(c[1])
-                continue
-            comment_id = str(attr[0] or "").strip()
-            kvs = attr[2] if isinstance(attr[2], list) else []
-            meta = {}
-            for item in kvs:
-                if isinstance(item, list) and len(item) == 2 and isinstance(item[0], str):
-                    meta[item[0]] = item[1]
-            hidden_meta = extract_hidden_meta(c[1])
-            merged_meta = dict(hidden_meta)
-            merged_meta.update({k: v for k, v in meta.items() if str(v or "").strip()})
-            if comment_id:
-                card_by_id[comment_id] = {
-                    "author": str(merged_meta.get("author") or "").strip(),
-                    "date": str(merged_meta.get("date") or "").strip(),
-                    "parent": str(merged_meta.get("parent") or "").strip(),
-                    "state": normalize_state_token(merged_meta.get("state") or ""),
-                    "text": extract_comment_card_text(c[1]),
-                }
-                collect_cards(c[1])
+            elif t == "BlockQuote" and isinstance(c, list):
+                collect_cards(c)
+            elif t in {"BulletList", "OrderedList"} and isinstance(c, list):
+                items = c if t == "BulletList" else (c[1] if len(c) > 1 else [])
+                for item in items:
+                    collect_cards(item)
+            elif isinstance(c, list):
+                for item in c:
+                    if isinstance(item, list):
+                        collect_cards([x for x in item if isinstance(x, dict)])
+                    elif isinstance(item, dict):
+                        collect_cards([item])
+            idx += 1
 
     collect_cards(doc.get("blocks", []))
     walk_blocks(doc.get("blocks", []))

@@ -52,7 +52,10 @@ NESTED_COMMENT_END_WRAPPER_RE = re.compile(
     re.DOTALL,
 )
 KV_ATTR_RE = re.compile(r'([A-Za-z_:][-A-Za-z0-9_:.]*)="([^"]*)"')
-CARD_HIDDEN_META_RE = re.compile(r"<!--\s*(?:DC_META\s*)?(\{.*?\})\s*-->", re.DOTALL)
+CARD_START_BLOCK_RE = re.compile(
+    r"<!--\s*CARD_START\s*\{\s*#(?P<id>[A-Za-z0-9][A-Za-z0-9_-]*)\s*(?P<attrs>.*?)\}\s*-->",
+    re.DOTALL,
+)
 MILESTONE_TOKEN_RE = re.compile(
     r"(?:/{3}\s*C(?P<id3c>[0-9][A-Za-z0-9_-]*)\s*\.\s*(?P<edge3c>[sSeE]|[Ss][Tt][Aa][Rr][Tt]|[Ee][Nn][Dd])\s*/{3})"
     r"|(?:/{3}\s*(?P<id3>[A-Za-z0-9][A-Za-z0-9_-]*)\s*\.\s*(?P<edge3>[sSeE]|[Ss][Tt][Aa][Rr][Tt]|[Ee][Nn][Dd])\s*/{3})"
@@ -377,15 +380,18 @@ def milestone_match_id_edge(match: re.Match):
 def extract_comment_card_text_from_blocks(blocks):
     parts = []
 
-    def is_display_line(text: str) -> bool:
+    def normalize_card_line(text: str):
         line = str(text or "").strip()
         if not line:
-            return False
+            return ""
+        if line.startswith("[!COMMENT ") and "]" in line:
+            tail = line.split("]", 1)[1].strip()
+            return tail
         if line.startswith("[!COMMENT ") and line.endswith("]"):
-            return True
+            return ""
         if line.startswith("COMMENT ") and ":" in line and line.endswith(")"):
-            return True
-        return False
+            return ""
+        return line
 
     for block in blocks or []:
         if not isinstance(block, dict):
@@ -393,18 +399,16 @@ def extract_comment_card_text_from_blocks(blocks):
         t = block.get("t")
         c = block.get("c")
         if t in {"Para", "Plain"} and isinstance(c, list):
-            line = inlines_to_text(c)
-            if line and not is_display_line(line):
+            line = normalize_card_line(inlines_to_text(c))
+            if line:
                 parts.append(line)
         elif t == "Header" and isinstance(c, list) and len(c) >= 3 and isinstance(c[2], list):
             line = inlines_to_text(c[2])
             if line:
                 parts.append(line)
         elif t == "RawBlock" and isinstance(c, list) and len(c) == 2:
-            fmt = str(c[0] or "").strip().lower()
-            raw = str(c[1] or "")
-            if fmt == "html" and CARD_HIDDEN_META_RE.search(raw):
-                continue
+            # CARD_START metadata markers are transport-only.
+            continue
         elif t == "BlockQuote" and isinstance(c, list):
             nested = extract_comment_card_text_from_blocks(c)
             if nested:
@@ -420,40 +424,62 @@ def extract_comment_card_text_from_blocks(blocks):
     return "\n\n".join([p for p in parts if p]).strip()
 
 
-def extract_hidden_comment_card_meta_from_blocks(blocks):
+def parse_card_start_marker(raw_html: str):
+    match = CARD_START_BLOCK_RE.search(raw_html or "")
+    if not match:
+        return "", {}
+    comment_id = str(match.group("id") or "").strip()
+    attrs_raw = str(match.group("attrs") or "").strip()
     meta = {}
-    for block in blocks or []:
-        if not isinstance(block, dict):
-            continue
-        t = block.get("t")
-        c = block.get("c")
-        if t == "RawBlock" and isinstance(c, list) and len(c) == 2:
-            fmt = str(c[0] or "").strip().lower()
-            raw = str(c[1] or "")
-            if fmt != "html":
-                continue
-            match = CARD_HIDDEN_META_RE.search(raw)
-            if not match:
-                continue
-            try:
-                payload = json.loads(match.group(1))
-            except json.JSONDecodeError:
-                payload = {}
-            if isinstance(payload, dict):
-                for key, value in payload.items():
-                    key_str = str(key or "").strip()
-                    if key_str:
-                        meta[key_str] = str(value or "").strip()
-            continue
-        if t == "Div" and isinstance(c, list) and len(c) == 2 and isinstance(c[1], list):
-            attr = c[0] if isinstance(c[0], list) else None
-            classes = attr[1] if isinstance(attr, list) and len(attr) == 3 and isinstance(attr[1], list) else []
-            if "comment-card" in classes:
-                continue
-            nested = extract_hidden_comment_card_meta_from_blocks(c[1])
-            if nested:
-                meta.update(nested)
-    return meta
+    if attrs_raw:
+        try:
+            payload = json.loads("{" + attrs_raw + "}")
+        except json.JSONDecodeError:
+            payload = {}
+        if isinstance(payload, dict):
+            for key, value in payload.items():
+                key_str = str(key or "").strip()
+                if key_str:
+                    meta[key_str] = str(value or "").strip()
+    return comment_id, meta
+
+
+def build_card_start_marker(comment_id: str, meta: dict):
+    attrs = []
+    for key in [
+        "author",
+        "date",
+        "parent",
+        "state",
+        "anchor",
+        "paraId",
+        "durableId",
+        "presenceProvider",
+        "presenceUserId",
+    ]:
+        value = str((meta or {}).get(key) or "").strip()
+        if value:
+            attrs.append(f"{json.dumps(key)}:{json.dumps(value, ensure_ascii=False)}")
+    attrs_part = (" " + ",".join(attrs)) if attrs else ""
+    return f"<!--CARD_START{{#{comment_id}{attrs_part}}}-->"
+
+
+def normalize_card_layout_text(text: str) -> str:
+    out = str(text or "")
+    # Keep card marker directly above the callout header.
+    out = re.sub(
+        r"(<!--CARD_START\{#[^\n]*\}-->)\n[ \t]*\n(> \[!COMMENT[^\n]*\])",
+        r"\1\n\2",
+        out,
+    )
+    # Keep callout header directly above comment body (no blank quote line).
+    out = re.sub(
+        r"(^> \[!COMMENT[^\n]*\])\n>[ \t]*\n(?=>[ \t]*\S)",
+        r"\1\n",
+        out,
+        flags=re.MULTILINE,
+    )
+    return out
 
 
 def parse_comment_cards_from_doc(doc):
@@ -463,52 +489,51 @@ def parse_comment_cards_from_doc(doc):
     def process_blocks(blocks):
         nonlocal removed
         kept = []
-        for block in blocks or []:
-            if not isinstance(block, dict) or block.get("t") != "Div":
+        idx = 0
+        while idx < len(blocks or []):
+            block = blocks[idx]
+            if not isinstance(block, dict):
                 kept.append(block)
+                idx += 1
                 continue
+            t = block.get("t")
             c = block.get("c")
-            if not (isinstance(c, list) and len(c) == 2):
-                kept.append(block)
-                continue
-            attr = c[0] if isinstance(c[0], list) else None
-            body_blocks = c[1] if isinstance(c[1], list) else None
-            if not (isinstance(attr, list) and len(attr) == 3 and isinstance(body_blocks, list)):
-                kept.append(block)
-                continue
-            classes = attr[1] if isinstance(attr[1], list) else []
-            identifier = str(attr[0] or "").strip()
-            kvs = attr[2] if isinstance(attr[2], list) else []
-            if "comment-card" not in classes:
-                block["c"][1] = process_blocks(body_blocks)
-                kept.append(block)
-                continue
-            meta = {}
-            for item in kvs:
-                if isinstance(item, list) and len(item) == 2 and isinstance(item[0], str):
-                    meta[item[0]] = item[1]
-            comment_id = identifier or str(meta.get("id") or "").strip()
-            if comment_id:
-                cleaned_blocks = process_blocks(body_blocks)
-                hidden_meta = extract_hidden_comment_card_meta_from_blocks(cleaned_blocks)
-                merged_meta = dict(hidden_meta)
-                merged_meta.update({k: v for k, v in meta.items() if str(v or "").strip()})
-                card_by_id[comment_id] = {
-                    "author": str(merged_meta.get("author") or "").strip(),
-                    "date": str(merged_meta.get("date") or "").strip(),
-                    "parent": str(merged_meta.get("parent") or "").strip(),
-                    "state": parse_state_token(merged_meta.get("state")),
-                    "paraId": str(merged_meta.get("paraId") or "").strip(),
-                    "durableId": str(merged_meta.get("durableId") or "").strip(),
-                    "presenceProvider": str(merged_meta.get("presenceProvider") or "").strip(),
-                    "presenceUserId": str(merged_meta.get("presenceUserId") or "").strip(),
-                    "anchor": str(merged_meta.get("anchor") or "").strip(),
-                    "text": extract_comment_card_text_from_blocks(cleaned_blocks),
-                }
-            removed += 1
+            if t == "RawBlock" and isinstance(c, list) and len(c) == 2:
+                fmt = str(c[0] or "").strip().lower()
+                raw = str(c[1] or "")
+                comment_id, meta = parse_card_start_marker(raw) if fmt == "html" else ("", {})
+                if comment_id:
+                    body_blocks = []
+                    if idx + 1 < len(blocks or []):
+                        next_block = blocks[idx + 1]
+                        if isinstance(next_block, dict) and next_block.get("t") == "BlockQuote":
+                            quote_blocks = next_block.get("c")
+                            body_blocks = quote_blocks if isinstance(quote_blocks, list) else []
+                            idx += 1
+                    card_by_id[comment_id] = {
+                        "author": str(meta.get("author") or "").strip(),
+                        "date": str(meta.get("date") or "").strip(),
+                        "parent": str(meta.get("parent") or "").strip(),
+                        "state": parse_state_token(meta.get("state")),
+                        "paraId": str(meta.get("paraId") or "").strip(),
+                        "durableId": str(meta.get("durableId") or "").strip(),
+                        "presenceProvider": str(meta.get("presenceProvider") or "").strip(),
+                        "presenceUserId": str(meta.get("presenceUserId") or "").strip(),
+                        "anchor": str(meta.get("anchor") or "").strip(),
+                        "text": extract_comment_card_text_from_blocks(body_blocks),
+                    }
+                    removed += 1
+                    idx += 1
+                    continue
+            if t == "Div" and isinstance(c, list) and len(c) == 2 and isinstance(c[1], list):
+                block["c"][1] = process_blocks(c[1])
+            elif t == "BlockQuote" and isinstance(c, list):
+                block["c"] = process_blocks(c)
+            kept.append(block)
+            idx += 1
         return kept
 
-    if removed or doc.get("blocks"):
+    if doc.get("blocks"):
         doc["blocks"] = process_blocks(doc.get("blocks", []))
     return card_by_id, removed
 
@@ -696,23 +721,8 @@ def rewrite_milestone_tokens_in_doc(doc, card_by_id=None):
     return changed
 
 
-def build_comment_card_div(comment_id: str, meta: dict, extra_classes=None, nested_blocks=None):
-    kvs = []
-    hidden_meta = {}
-    for key in [
-        "author",
-        "date",
-        "parent",
-        "state",
-        "anchor",
-        "paraId",
-        "durableId",
-        "presenceProvider",
-        "presenceUserId",
-    ]:
-        value = str((meta or {}).get(key) or "").strip()
-        if value:
-            hidden_meta[key] = value
+def build_comment_card_blocks(comment_id: str, meta: dict):
+    marker = build_card_start_marker(comment_id, meta)
     text = str((meta or {}).get("text") or "").strip()
     lines = text.splitlines() if text else [""]
     author = str((meta or {}).get("author") or "").strip() or "Unknown"
@@ -723,22 +733,10 @@ def build_comment_card_div(comment_id: str, meta: dict, extra_classes=None, nest
     ]
     for line in lines:
         quote_blocks.append({"t": "Para", "c": text_to_pandoc_inlines(line)})
-    blocks = [
+    return [
+        {"t": "RawBlock", "c": ["html", marker]},
         {"t": "BlockQuote", "c": quote_blocks},
     ]
-    if hidden_meta:
-        hidden_meta_json = json.dumps(hidden_meta, ensure_ascii=False, separators=(",", ":"))
-        blocks.append({"t": "RawBlock", "c": ["html", f"<!--{hidden_meta_json}-->"]})
-    if nested_blocks:
-        blocks.extend(nested_blocks)
-    classes = ["comment-card"]
-    for cls in extra_classes or []:
-        if cls and cls not in classes:
-            classes.append(cls)
-    return {
-        "t": "Div",
-        "c": [[str(comment_id), classes, kvs], blocks],
-    }
 
 
 def rewrite_comment_spans_to_milestones_in_doc(doc, child_ids=None):
@@ -875,26 +873,23 @@ def emit_milestones_and_cards_ast(
         for parent, children in children_by_parent.items():
             children.sort(key=lambda x: order_index.get(x, 10**9))
 
-        def build_thread_card(comment_id, seen=None, is_reply=False):
+        def build_thread_blocks(comment_id, seen=None):
             if seen is None:
                 seen = set()
             if comment_id in seen:
-                return None
+                return []
             seen.add(comment_id)
             meta = dict(cards_meta_by_id.get(comment_id) or {})
             if anchor_by_id.get(comment_id):
                 meta.setdefault("anchor", anchor_by_id.get(comment_id))
-            nested = []
+            blocks = build_comment_card_blocks(comment_id, meta)
             for child_id in children_by_parent.get(comment_id, []):
-                child_div = build_thread_card(child_id, seen=seen, is_reply=True)
-                if child_div is not None:
-                    nested.append(child_div)
-            extra_classes = ["comment-reply-card"] if is_reply else []
-            return build_comment_card_div(comment_id, meta, extra_classes=extra_classes, nested_blocks=nested)
+                blocks.extend(build_thread_blocks(child_id, seen=seen))
+            return blocks
 
         cards_by_root_id = {}
         for root_id in start_order:
-            cards_by_root_id[root_id] = build_thread_card(root_id, seen=set(), is_reply=False)
+            cards_by_root_id[root_id] = build_thread_blocks(root_id, seen=set())
 
         marker_order = []
 
@@ -1021,14 +1016,14 @@ def emit_milestones_and_cards_ast(
         cards_after_index = {}
         pending_append = []
         for cid in start_order:
-            card = cards_by_root_id.get(cid)
-            if card is None:
+            card_blocks = cards_by_root_id.get(cid) or []
+            if not card_blocks:
                 continue
             insert_after = last_end_index.get(cid, first_start_index.get(cid))
             if insert_after is None:
-                pending_append.append(card)
+                pending_append.extend(card_blocks)
                 continue
-            cards_after_index.setdefault(insert_after, []).append(card)
+            cards_after_index.setdefault(insert_after, []).extend(card_blocks)
 
         out_blocks = []
         for idx, block in enumerate(top_blocks):
@@ -1044,6 +1039,8 @@ def emit_milestones_and_cards_ast(
             extra_args=pandoc_extra_args,
             cwd=cwd,
         )
+        normalized = normalize_card_layout_text(md_path.read_text(encoding="utf-8"))
+        md_path.write_text(normalized, encoding="utf-8")
     return changed, len(start_order)
 
 

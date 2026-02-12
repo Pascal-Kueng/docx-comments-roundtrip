@@ -13,12 +13,12 @@ This tool is intentionally focused on comment-safe conversion:
   - numeric aliases like `///C1.START///` / `///C1.END///`
   - whitespace-tolerant forms like `/// c1 . start ///`
   - backward-compatible legacy forms: `DC_COMMENT(c1.s)` and `{[c1.s]}`
-- `docx -> md`: emits milestone markers in prose for root comments and inserts matching `.comment-card` blocks right after the block that closes the root marker span.
-- Each `.comment-card` is human-readable:
+- `docx -> md`: emits milestone markers in prose for root comments and inserts card records right after the block that closes the root marker span.
+- Card record format is markdown-friendly and parser-stable:
+  - `<!--CARD_START{#<id> ...}-->` (metadata)
   - blockquote callout header `>[!COMMENT <id>: <author> (<state>)]`
-  - hidden JSON transport comment `<!--{...}-->` for robust roundtrip-only fields
-  - comment body text
-- Thread replies are represented as nested `.comment-card .comment-reply-card` blocks under their root card (not as extra inline prose markers).
+  - quoted comment body text
+- Thread replies are represented as additional card records with `parent` metadata (no fenced Div wrappers).
 - Threaded Word replies are flattened into the parent comment body for stable roundtrip output.
 - Comment state is preserved for roots (`active` vs `resolved`).
 - Known pandoc shape-placeholder image artifacts are filtered out of markdown.
