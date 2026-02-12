@@ -12,7 +12,6 @@ This tool is intentionally focused on comment-safe conversion:
   - `///c1.START///` / `///c1.END///` (canonical)
   - numeric aliases like `///C1.START///` / `///C1.END///`
   - whitespace-tolerant forms like `/// c1 . start ///`
-  - backward-compatible legacy forms: `DC_COMMENT(c1.s)` and `{[c1.s]}`
 - `docx -> md`: emits milestone markers in prose for root comments and inserts card records right after the block that closes the root marker span.
 - Card record format is markdown-friendly and parser-stable:
   - `<!--CARD_START{#<id> ...}-->` (metadata)

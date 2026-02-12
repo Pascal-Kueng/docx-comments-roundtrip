@@ -131,7 +131,7 @@ class TestMarkdownAttrTransforms(unittest.TestCase):
         in_md.write_text(
             (
                 "```text\n"
-                "literal DC_COMMENT(c99.s) should stay untouched in code\n"
+                "literal ///c99.START/// should stay untouched in code\n"
                 "```\n\n"
                 "Start /// c1 . START ///alpha///c1.eNd/// and ///c2.s///beta/// c2 . E ///.\n"
             ),
@@ -148,7 +148,7 @@ class TestMarkdownAttrTransforms(unittest.TestCase):
         self.assertEqual(replaced, 4)
 
         output = out_md.read_text(encoding="utf-8")
-        self.assertIn("literal DC_COMMENT(c99.s) should stay untouched in code", output)
+        self.assertIn("literal ///c99.START/// should stay untouched in code", output)
         self.assertNotIn("/// c1 . START ///", output)
         self.assertNotIn("///c2.s///", output)
 
