@@ -8,6 +8,7 @@ This tool is intentionally focused on comment-safe conversion:
 
 - `docx -> md`: keeps comment anchors as markdown spans (`.comment-start` / `.comment-end`) with metadata.
 - `md -> docx`: reconstructs comments from markdown spans.
+- `md -> docx`: preserves native Word threading (replies stay replies; no flattening fallback in output).
 - `md -> docx`: also accepts shorthand milestone markers in prose and normalizes them to comment spans:
   - `///c1.START///` / `///c1.END///` (canonical inner token)
   - optional highlighted wrapper: `==///c1.START///==` / `==///c1.END///==`

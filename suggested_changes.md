@@ -2,15 +2,17 @@
 
 This document outlines recommended improvements to increase the robustness, portability, and maintainability of the repository.
 
-## 1. High Priority
+## Completed
 
 ### Restore Nested Word Comments (No Flattening)
-Currently, the tool flattens threaded Word replies into a single parent comment body during the `md -> docx` conversion.
-- **Goal:** Reconstruct the actual threaded structure in the output `.docx`.
-- **Implementation:** 
-    - Use the `parentId` attribute in `word/comments.xml`.
-    - Ensure corresponding `paraIdParent` entries are correctly set in `word/commentsExtended.xml`.
-    - This preserves the native Word "Reply" UI and allows users to continue threads naturally after a roundtrip.
+Implemented (Feb 2026).
+
+- `md -> docx` now reconstructs native threaded Word comments.
+- Reply links are written through `w15:parentId` in `word/comments.xml` and
+  `w15:paraIdParent` in `word/commentsExtended.xml`.
+- Roundtrip tests assert parent-map parity and reply linkage preservation.
+
+## 1. High Priority
 
 ### Fix Test Portability
 The test suite currently hardcodes `/tmp` in `tempfile.mkdtemp` calls.

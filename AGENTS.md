@@ -106,6 +106,7 @@ Do not reintroduce these failure patterns:
   - `comments.xml` with `parentId`
   - `commentsExtended.xml` with `paraIdParent`
   - `commentsIds.xml` / `commentsExtensible.xml` with durable mappings
+- Do not reintroduce reply flattening in the `md -> docx` path; threaded reconstruction is the required behavior.
 
 4. Over-broad markdown parent assignment.
 - Only trust parent-child links for IDs confirmed as real `.comment-start` spans.

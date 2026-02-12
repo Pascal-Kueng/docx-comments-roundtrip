@@ -12,7 +12,7 @@ test: roundtrip-example
 	python3 -m unittest -q
 
 test-roundtrip:
-	python3 -m unittest -q tests.test_roundtrip_example tests.test_roundtrip_edges
+	python3 -m unittest -q tests.test_roundtrip_example tests.test_roundtrip_edges tests.test_markdown_roundtrip
 
 roundtrip-example:
 	mkdir -p $(MANUAL_DIR)
