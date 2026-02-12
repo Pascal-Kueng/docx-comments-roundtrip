@@ -21,6 +21,7 @@ Core requirements:
 - `docx2md`, `md2docx`: thin wrapper scripts.
 - `tests/test_roundtrip_example.py`: fixture-backed roundtrip parity test.
 - `tests/test_roundtrip_edges.py`: synthetic edge-case roundtrip tests.
+- `tests/test_markdown_attr_transforms.py`: regression tests for AST-based markdown attr transforms.
 - `tests/helpers/docx_inspector.py`: reads DOCX XML into comparable snapshots.
 - `tests/helpers/markdown_inspector.py`: reads markdown comment spans into snapshots.
 - `tests/helpers/diagnostics.py`: writes failure bundles and diffs.
@@ -47,6 +48,11 @@ Expected span metadata:
 Internal transport metadata (docx->md->docx only; must be stripped before pandoc md->docx):
 
 - `.comment-start`: `paraId`, `durableId`, `presenceProvider`, `presenceUserId`.
+
+Canonical span-ID rule:
+
+- Keep comment IDs in explicit attribute form (`id="..."`) for both `.comment-start` and `.comment-end`.
+- Do not rely on Pandoc identifier shorthand (`{#id ...}`) for comment markers.
 
 `state` must normalize to:
 
@@ -105,6 +111,15 @@ Do not reintroduce these failure patterns:
 - OnlyOffice may show resolved states even when Word does not.
 - Use Word as the acceptance target for resolved/active parity.
 
+9. Regex-only mutation of comment span attributes.
+- Do not mutate `.comment-start` metadata with raw markdown regex replacement.
+- Use Pandoc JSON AST traversal so only real comment spans are changed and code/prose literals are untouched.
+- Keep regex-based repair for unbalanced/nested end markers, because malformed markers may not parse as spans before repair.
+
+10. Dropping marker normalization after AST re-serialization.
+- After AST markdown re-emit, run end-marker repair/normalization again before md->docx conversion.
+- This prevents missing `commentRangeEnd` / `commentReference` regressions from nested wrappers.
+
 ## Operational constraints
 
 - This tool is often stow-managed and symlinked into `~/.local/bin`.
@@ -112,6 +127,7 @@ Do not reintroduce these failure patterns:
 - Keep temp files near the input/output document path.
 - Use `TemporaryDirectory(...)` and clean up automatically.
 - Keep `sys.dont_write_bytecode = True` behavior to avoid `__pycache__` sprawl.
+- Validate `pandoc` availability/version at runtime and fail early with clear errors.
 
 ## Required verification workflow
 
@@ -125,6 +141,10 @@ Run before merging behavior changes:
 
 2. `make test-roundtrip`
 - Runs roundtrip-focused tests only.
+
+2.1 Targeted AST transform checks:
+- `python3 -m unittest -q tests.test_markdown_attr_transforms`
+- Verifies code/literal fake marker text is not modified while real comment spans are.
 
 3. Manual inspection in Word for fixture output:
 - Comment count parity for roots.
@@ -167,3 +187,6 @@ When changing comment logic, update both converter and tests in the same PR:
   - no invalid comment-level state attrs in `comments.xml`
   - presenceInfo preservation per author when present in source
   - thread paraId alignment to last paragraph paraId for multi-paragraph comments
+- Comment metadata transport now uses Pandoc JSON AST mutation for `.comment-start` attrs (not regex text replacement).
+- AST re-serialization preserves user-requested writer when available (`-t/--to` passthrough).
+- Comment marker IDs are normalized to `id="..."` attributes after AST operations to keep downstream marker repair stable.
