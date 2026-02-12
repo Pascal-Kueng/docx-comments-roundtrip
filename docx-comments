@@ -53,7 +53,9 @@ NESTED_COMMENT_END_WRAPPER_RE = re.compile(
 )
 KV_ATTR_RE = re.compile(r'([A-Za-z_:][-A-Za-z0-9_:.]*)="([^"]*)"')
 MILESTONE_TOKEN_RE = re.compile(
-    r"(?:DC_COMMENT\(\s*(?:dc\s*:\s*)?(?P<id1>[A-Za-z0-9][A-Za-z0-9_-]*)\s*\.\s*(?P<edge1>[sSeE])\s*\))"
+    r"(?:/{3}\s*C(?P<id3c>[0-9][A-Za-z0-9_-]*)\s*\.\s*(?P<edge3c>[sSeE]|[Ss][Tt][Aa][Rr][Tt]|[Ee][Nn][Dd])\s*/{3})"
+    r"|(?:/{3}\s*(?P<id3>[A-Za-z0-9][A-Za-z0-9_-]*)\s*\.\s*(?P<edge3>[sSeE]|[Ss][Tt][Aa][Rr][Tt]|[Ee][Nn][Dd])\s*/{3})"
+    r"|(?:DC_COMMENT\(\s*(?:dc\s*:\s*)?(?P<id1>[A-Za-z0-9][A-Za-z0-9_-]*)\s*\.\s*(?P<edge1>[sSeE])\s*\))"
     r"|(?:\{\[\s*(?:dc\s*:\s*)?(?P<id2>[A-Za-z0-9][A-Za-z0-9_-]*)\s*\.\s*(?P<edge2>[sSeE])\s*\]\})"
 )
 INLINE_IMAGE_RE = re.compile(
@@ -334,7 +336,41 @@ def text_to_pandoc_inlines(text: str):
 
 
 def milestone_marker_inline(comment_id: str, edge: str):
-    return {"t": "Str", "c": f"DC_COMMENT({comment_id}.{edge})"}
+    cid = str(comment_id or "").strip()
+    edge_token = normalize_milestone_edge(edge)
+    if edge_token not in {"s", "e"}:
+        edge_token = "s"
+    edge_label = "START" if edge_token == "s" else "END"
+    marker_id = f"C{cid}" if cid.isdigit() else cid
+    return {"t": "Str", "c": f"///{marker_id}.{edge_label}///"}
+
+
+def normalize_milestone_edge(edge_token: str) -> str:
+    token = str(edge_token or "").strip().lower()
+    if token in {"s", "start"}:
+        return "s"
+    if token in {"e", "end"}:
+        return "e"
+    return ""
+
+
+def milestone_match_id_edge(match: re.Match):
+    group_dict = match.groupdict()
+    comment_id = str(
+        group_dict.get("id3c")
+        or group_dict.get("id3")
+        or group_dict.get("id1")
+        or group_dict.get("id2")
+        or ""
+    ).strip()
+    edge_token = str(
+        group_dict.get("edge3c")
+        or group_dict.get("edge3")
+        or group_dict.get("edge1")
+        or group_dict.get("edge2")
+        or ""
+    )
+    return comment_id, normalize_milestone_edge(edge_token)
 
 
 def extract_comment_card_text_from_blocks(blocks):
@@ -457,8 +493,7 @@ def expand_milestone_tokens_in_text(text: str, card_by_id=None):
     for match in matches:
         if match.start() > cursor:
             out.extend(text_to_pandoc_inlines(text[cursor : match.start()]))
-        comment_id = str(match.group("id1") or match.group("id2") or "").strip()
-        edge = str(match.group("edge1") or match.group("edge2") or "").strip().lower()
+        comment_id, edge = milestone_match_id_edge(match)
         if comment_id and edge in {"s", "e"}:
             out.append(make_comment_span_inline(comment_id, edge, card_by_id))
             next_cursor = match.end()
@@ -792,8 +827,7 @@ def emit_milestones_and_cards_ast(
 
         def push_marker_ids_from_text(text, start_ids, end_ids):
             for match in MILESTONE_TOKEN_RE.finditer(text or ""):
-                mid = (match.group("id1") or match.group("id2") or "").strip()
-                edge = (match.group("edge1") or match.group("edge2") or "").lower()
+                mid, edge = milestone_match_id_edge(match)
                 if not mid or edge not in {"s", "e"}:
                     continue
                 if edge == "s":

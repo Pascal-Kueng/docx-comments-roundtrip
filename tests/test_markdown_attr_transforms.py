@@ -132,7 +132,7 @@ class TestMarkdownAttrTransforms(unittest.TestCase):
                 "```text\n"
                 "literal DC_COMMENT(c99.s) should stay untouched in code\n"
                 "```\n\n"
-                "Start DC_COMMENT( c1 . s )alphaDC_COMMENT(c1.e) and DC_COMMENT(dc:c2.s)betaDC_COMMENT( c2 . e ).\n"
+                "Start /// c1 . START ///alpha///c1.eNd/// and ///c2.s///beta/// c2 . E ///.\n"
             ),
             encoding="utf-8",
         )
@@ -148,8 +148,8 @@ class TestMarkdownAttrTransforms(unittest.TestCase):
 
         output = out_md.read_text(encoding="utf-8")
         self.assertIn("literal DC_COMMENT(c99.s) should stay untouched in code", output)
-        self.assertNotIn("DC_COMMENT( c1 . s )", output)
-        self.assertNotIn("DC_COMMENT(dc:c2.s)", output)
+        self.assertNotIn("/// c1 . START ///", output)
+        self.assertNotIn("///c2.s///", output)
 
         attrs = extract_comment_start_attrs(out_md)
         self.assertIn("c1", attrs)
@@ -244,10 +244,10 @@ class TestMarkdownAttrTransforms(unittest.TestCase):
         self.assertGreater(changed, 0)
 
         emitted = md_path.read_text(encoding="utf-8")
-        self.assertIn("DC_COMMENT(c1.s)", emitted)
-        self.assertIn("DC_COMMENT(c1.e)", emitted)
-        self.assertNotIn("DC_COMMENT(c2.s)", emitted)
-        self.assertNotIn("DC_COMMENT(c2.e)", emitted)
+        self.assertIn("///c1.START///", emitted)
+        self.assertIn("///c1.END///", emitted)
+        self.assertNotIn("///c2.START///", emitted)
+        self.assertNotIn("///c2.END///", emitted)
         self.assertIn('{#c2 .comment-card .comment-reply-card', emitted)
 
         replaced, card_by_id = normalize_tokens(
@@ -299,7 +299,7 @@ class TestMarkdownAttrTransforms(unittest.TestCase):
         self.assertEqual(card_count, 1)
 
         output = md_path.read_text(encoding="utf-8")
-        end_pos = output.find("DC_COMMENT(c1.e)")
+        end_pos = output.find("///c1.END///")
         card_pos = output.find("{#c1 .comment-card")
         self.assertNotEqual(end_pos, -1)
         self.assertNotEqual(card_pos, -1)

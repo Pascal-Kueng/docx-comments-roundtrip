@@ -9,10 +9,11 @@ This tool is intentionally focused on comment-safe conversion:
 - `docx -> md`: keeps comment anchors as markdown spans (`.comment-start` / `.comment-end`) with metadata.
 - `md -> docx`: reconstructs comments from markdown spans.
 - `md -> docx`: also accepts shorthand milestone markers in prose and normalizes them to comment spans:
-  - `DC_COMMENT(c1.s)` / `DC_COMMENT(c1.e)`
-  - whitespace-tolerant forms like `DC_COMMENT( c1 . s )`
-  - legacy `{[... ]}` token forms are still accepted for backward compatibility
-- `docx -> md`: emits milestone markers in prose for root comments and inserts matching `.comment-card` blocks immediately after the paragraph/header where each root starts.
+  - `///c1.START///` / `///c1.END///` (canonical)
+  - numeric aliases like `///C1.START///` / `///C1.END///`
+  - whitespace-tolerant forms like `/// c1 . start ///`
+  - backward-compatible legacy forms: `DC_COMMENT(c1.s)` and `{[c1.s]}`
+- `docx -> md`: emits milestone markers in prose for root comments and inserts matching `.comment-card` blocks right after the block that closes the root marker span.
 - Thread replies are represented as nested `.comment-card .comment-reply-card` blocks under their root card (not as extra inline prose markers).
 - Threaded Word replies are flattened into the parent comment body for stable roundtrip output.
 - Comment state is preserved for roots (`active` vs `resolved`).

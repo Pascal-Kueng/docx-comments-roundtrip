@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 import tempfile
@@ -19,6 +20,7 @@ from tests.helpers.markdown_inspector import inspect_markdown_comments
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CONVERTER_PATH = REPO_ROOT / "docx-comments"
 EXAMPLE_DOCX = REPO_ROOT / "Preregistration_Original.docx"
+MILESTONE_TOKEN_RE = re.compile(r"///[A-Za-z0-9][A-Za-z0-9_-]*\.(?:START|END)///")
 
 
 def run_converter(converter_path: Path, input_path: Path, output_path: Path, cwd: Path) -> dict:
@@ -163,8 +165,8 @@ class TestPreregistrationRoundtrip(unittest.TestCase):
             )
 
         markdown_text_for_mode = intermediate_md.read_text(encoding="utf-8")
-        if "DC_COMMENT(" not in markdown_text_for_mode:
-            errors.append("Markdown does not contain readable milestone markers (DC_COMMENT).")
+        if not MILESTONE_TOKEN_RE.search(markdown_text_for_mode):
+            errors.append("Markdown does not contain readable milestone markers (///...START/END///).")
         if ".comment-card" not in markdown_text_for_mode:
             errors.append("Markdown does not contain comment cards (.comment-card).")
 
@@ -222,7 +224,7 @@ class TestPreregistrationRoundtrip(unittest.TestCase):
                         f"expected={expected_durable_id} actual={actual_durable_id}"
                     )
 
-        uses_milestone_markers = "DC_COMMENT(" in markdown_text_for_mode
+        uses_milestone_markers = bool(MILESTONE_TOKEN_RE.search(markdown_text_for_mode))
         if not uses_milestone_markers:
             threaded_root_ids = set(original.parent_map.values())
             for root_id in expected_from_original.root_ids_order:

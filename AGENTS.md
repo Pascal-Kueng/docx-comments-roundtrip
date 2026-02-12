@@ -48,10 +48,11 @@ Expected span metadata:
 Additionally accepted on md->docx input:
 
 - Shorthand milestone tokens in prose:
-  - `DC_COMMENT(c1.s)` (start), `DC_COMMENT(c1.e)` (end)
-  - whitespace-tolerant variants: `DC_COMMENT( c1 . s )`
-  - legacy `{[c1.s]}` forms are accepted on input for backward compatibility only
-- In docx->md output, each root/thread comment also gets a `.comment-card` Div inserted directly after the block that contains its start marker (not batched at document end).
+  - `///c1.START///` (start), `///c1.END///` (end) as canonical form
+  - numeric aliases: `///C1.START///` / `///C1.END///`
+  - whitespace-tolerant variants: `/// c1 . start ///`
+  - legacy `DC_COMMENT(c1.s)` and `{[c1.s]}` forms are accepted on input for backward compatibility only
+- In docx->md output, each root/thread comment also gets a `.comment-card` Div inserted directly after the block that contains its root end marker (not batched at document end).
 - Only root comments keep inline milestone markers in prose; reply comments are carried via nested cards under the root card.
 - Nested reply cards use `.comment-card .comment-reply-card` and preserve `parent` metadata.
 - These are AST-normalized to canonical span markers before extraction.
@@ -132,7 +133,7 @@ Do not reintroduce these failure patterns:
 - This prevents missing `commentRangeEnd` / `commentReference` regressions from nested wrappers.
 
 11. Over-tolerant milestone marker parsing.
-- Milestone parsing must stay strict: only `DC_COMMENT(<id>.<s|e>)` (plus legacy `{[<id>.<s|e>]}` compatibility) with controlled ID charset.
+- Milestone parsing must stay strict: only `///<id>.START|END///` (plus compatibility for `///C<digits>.START|END///`, `DC_COMMENT(<id>.<s|e>)`, and `{[<id>.<s|e>]}`) with controlled ID charset.
 - Do not match arbitrary prose fragments, or false positives will create phantom comments.
 
 ## Operational constraints
@@ -205,4 +206,4 @@ When changing comment logic, update both converter and tests in the same PR:
 - Comment metadata transport now uses Pandoc JSON AST mutation for `.comment-start` attrs (not regex text replacement).
 - AST re-serialization preserves user-requested writer when available (`-t/--to` passthrough).
 - Comment marker IDs are normalized to `id="..."` attributes after AST operations to keep downstream marker repair stable.
-- md->docx now normalizes shorthand milestone tokens (`{[id.s]}` / `{[id.e]}`, spacing tolerant, optional `dc:` prefix) to canonical comment spans via Pandoc AST before comment extraction.
+- md->docx now normalizes shorthand milestone tokens (`///<id>.START|END///` canonical; plus legacy `{[id.s]}` / `{[id.e]}` and `DC_COMMENT(...)`, spacing tolerant) to canonical comment spans via Pandoc AST before comment extraction.

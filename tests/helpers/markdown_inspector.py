@@ -13,9 +13,39 @@ INLINE_IMAGE_RE = re.compile(
     re.DOTALL,
 )
 MILESTONE_TOKEN_RE = re.compile(
-    r"(?:DC_COMMENT\(\s*(?:dc\s*:\s*)?(?P<id1>[A-Za-z0-9][A-Za-z0-9_-]*)\s*\.\s*(?P<edge1>[sSeE])\s*\))"
+    r"(?:/{3}\s*C(?P<id3c>[0-9][A-Za-z0-9_-]*)\s*\.\s*(?P<edge3c>[sSeE]|[Ss][Tt][Aa][Rr][Tt]|[Ee][Nn][Dd])\s*/{3})"
+    r"|(?:/{3}\s*(?P<id3>[A-Za-z0-9][A-Za-z0-9_-]*)\s*\.\s*(?P<edge3>[sSeE]|[Ss][Tt][Aa][Rr][Tt]|[Ee][Nn][Dd])\s*/{3})"
+    r"|(?:DC_COMMENT\(\s*(?:dc\s*:\s*)?(?P<id1>[A-Za-z0-9][A-Za-z0-9_-]*)\s*\.\s*(?P<edge1>[sSeE])\s*\))"
     r"|(?:\{\[\s*(?:dc\s*:\s*)?(?P<id2>[A-Za-z0-9][A-Za-z0-9_-]*)\s*\.\s*(?P<edge2>[sSeE])\s*\]\})"
 )
+
+
+def normalize_milestone_edge(edge_token: str) -> str:
+    token = str(edge_token or "").strip().lower()
+    if token in {"s", "start"}:
+        return "s"
+    if token in {"e", "end"}:
+        return "e"
+    return ""
+
+
+def milestone_match_id_edge(match: re.Match) -> tuple[str, str]:
+    group_dict = match.groupdict()
+    comment_id = str(
+        group_dict.get("id3c")
+        or group_dict.get("id3")
+        or group_dict.get("id1")
+        or group_dict.get("id2")
+        or ""
+    ).strip()
+    edge_token = str(
+        group_dict.get("edge3c")
+        or group_dict.get("edge3")
+        or group_dict.get("edge1")
+        or group_dict.get("edge2")
+        or ""
+    )
+    return comment_id, normalize_milestone_edge(edge_token)
 
 
 @dataclass(frozen=True)
@@ -289,8 +319,7 @@ def inspect_markdown_comments(markdown_path: Path) -> MarkdownCommentSnapshot:
                     j += 1
                 chunk = "".join(parts)
                 for match in MILESTONE_TOKEN_RE.finditer(chunk):
-                    cid = (match.group("id1") or match.group("id2") or "").strip()
-                    edge = (match.group("edge1") or match.group("edge2") or "").strip().lower()
+                    cid, edge = milestone_match_id_edge(match)
                     if edge == "s":
                         on_start(cid, {}, [])
                     elif edge == "e":
