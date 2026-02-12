@@ -48,7 +48,8 @@ Expected span metadata:
 Additionally accepted on md->docx input:
 
 - Shorthand milestone tokens in prose:
-  - `///c1.START///` (start), `///c1.END///` (end) as canonical form
+  - `///c1.START///` (start), `///c1.END///` (end) as canonical inner form
+  - optional highlighted wrapper: `==///c1.START///==` / `==///c1.END///==`
   - numeric aliases: `///C1.START///` / `///C1.END///`
   - whitespace-tolerant variants: `/// c1 . start ///`
 - In docx->md output, each root comment gets a blockquote callout inserted directly after the block that contains its root end marker (not batched at document end):
@@ -138,8 +139,10 @@ Do not reintroduce these failure patterns:
 - This prevents missing `commentRangeEnd` / `commentReference` regressions from nested wrappers.
 
 11. Over-tolerant milestone marker parsing.
-- Milestone parsing must stay strict: only `///<id>.START|END///` (plus compatibility for `///C<digits>.START|END///`) with controlled ID charset.
+- Milestone parsing must stay strict: only `///<id>.START|END///` (plus optional `==...==` wrapper and compatibility for `///C<digits>.START|END///`) with controlled ID charset.
 - Do not match arbitrary prose fragments, or false positives will create phantom comments.
+- Do not silently auto-repair missing START/END marker pairs in md->docx; fail fast with actionable diagnostics instead.
+- Reject one-sided wrapper forms (e.g., `==///C1.START///` or `///C1.END///==`) with line-specific errors.
 
 ## Operational constraints
 
@@ -211,5 +214,6 @@ When changing comment logic, update both converter and tests in the same PR:
 - Comment metadata transport now uses Pandoc JSON AST mutation for `.comment-start` attrs (not regex text replacement).
 - AST re-serialization preserves user-requested writer when available (`-t/--to` passthrough).
 - Comment marker IDs are normalized to `id="..."` attributes after AST operations to keep downstream marker repair stable.
-- md->docx now normalizes shorthand milestone tokens (`///<id>.START|END///`, spacing tolerant) to canonical comment spans via Pandoc AST before comment extraction.
+- md->docx now normalizes shorthand milestone tokens (`///<id>.START|END///`, optional `==...==` highlight wrapper, spacing tolerant) to canonical comment spans via Pandoc AST before comment extraction.
+- md->docx validates marker integrity before conversion and aborts with clear line-specific errors if root marker pairs are missing/duplicated/unbalanced.
 - Current markdown card transport format is `COMMENT/REPLY` blockquote callouts with inline `CARD_META` HTML comments (no `CARD_START` markers, no fenced Div wrappers, no backward-compat parsing path).

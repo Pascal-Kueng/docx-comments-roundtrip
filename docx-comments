@@ -61,6 +61,12 @@ CARD_HEADER_RE = re.compile(
     re.IGNORECASE,
 )
 MILESTONE_TOKEN_RE = re.compile(
+    r"(?:(?P<markeq>==)\s*)?"
+    r"(?:/{3}\s*C(?P<id3c>[0-9][A-Za-z0-9_-]*)\s*\.\s*(?P<edge3c>[sSeE]|[Ss][Tt][Aa][Rr][Tt]|[Ee][Nn][Dd])\s*/{3}"
+    r"|/{3}\s*(?P<id3>[A-Za-z0-9][A-Za-z0-9_-]*)\s*\.\s*(?P<edge3>[sSeE]|[Ss][Tt][Aa][Rr][Tt]|[Ee][Nn][Dd])\s*/{3})"
+    r"(?(markeq)\s*==)"
+)
+MILESTONE_CORE_TOKEN_RE = re.compile(
     r"(?:/{3}\s*C(?P<id3c>[0-9][A-Za-z0-9_-]*)\s*\.\s*(?P<edge3c>[sSeE]|[Ss][Tt][Aa][Rr][Tt]|[Ee][Nn][Dd])\s*/{3})"
     r"|(?:/{3}\s*(?P<id3>[A-Za-z0-9][A-Za-z0-9_-]*)\s*\.\s*(?P<edge3>[sSeE]|[Ss][Tt][Aa][Rr][Tt]|[Ee][Nn][Dd])\s*/{3})"
 )
@@ -348,7 +354,7 @@ def milestone_marker_inline(comment_id: str, edge: str):
         edge_token = "s"
     edge_label = "START" if edge_token == "s" else "END"
     marker_id = f"C{cid}" if cid.isdigit() else cid
-    return {"t": "Str", "c": f"///{marker_id}.{edge_label}///"}
+    return {"t": "Str", "c": f"==///{marker_id}.{edge_label}///=="}
 
 
 def normalize_milestone_edge(edge_token: str) -> str:
@@ -1322,6 +1328,189 @@ def normalize_milestone_tokens_ast(
             cwd=cwd,
         )
     return changed, card_by_id
+
+
+def line_col_for_offset(text: str, offset: int):
+    safe_offset = max(0, min(len(text or ""), int(offset)))
+    line = (text or "").count("\n", 0, safe_offset) + 1
+    last_newline = (text or "").rfind("\n", 0, safe_offset)
+    col = safe_offset - (last_newline + 1) + 1
+    return line, col
+
+
+def line_excerpt(text: str, line_no: int, max_len: int = 140):
+    lines = (text or "").splitlines()
+    if line_no < 1 or line_no > len(lines):
+        return ""
+    excerpt = lines[line_no - 1].strip()
+    if len(excerpt) > max_len:
+        excerpt = excerpt[: max_len - 3] + "..."
+    return excerpt
+
+
+def collect_span_marker_positions(markdown_text: str):
+    starts_by_id = {}
+    ends_by_id = {}
+
+    for match in COMMENT_START_ATTR_BLOCK_RE.finditer(markdown_text or ""):
+        attrs = {k: v for k, v in KV_ATTR_RE.findall(match.group("attrs"))}
+        comment_id = str(attrs.get("id") or "").strip()
+        if not comment_id:
+            continue
+        line_no, col_no = line_col_for_offset(markdown_text, match.start())
+        starts_by_id.setdefault(comment_id, []).append(
+            {"offset": match.start(), "line": line_no, "col": col_no}
+        )
+
+    for match in COMMENT_END_ATTR_BLOCK_RE.finditer(markdown_text or ""):
+        attrs = {k: v for k, v in KV_ATTR_RE.findall(match.group("attrs"))}
+        comment_id = str(attrs.get("id") or "").strip()
+        if not comment_id:
+            continue
+        line_no, col_no = line_col_for_offset(markdown_text, match.start())
+        ends_by_id.setdefault(comment_id, []).append(
+            {"offset": match.start(), "line": line_no, "col": col_no}
+        )
+
+    return starts_by_id, ends_by_id
+
+
+def collect_root_card_lines(markdown_text: str):
+    root_line_by_id = {}
+    for match in CARD_META_INLINE_RE.finditer(markdown_text or ""):
+        comment_id, meta = parse_card_meta_marker(match.group(0) or "")
+        if not comment_id:
+            continue
+        parent_id = str((meta or {}).get("parent") or "").strip()
+        if parent_id:
+            continue
+        if comment_id in root_line_by_id:
+            continue
+        line_no, _ = line_col_for_offset(markdown_text, match.start())
+        root_line_by_id[comment_id] = line_no
+    return root_line_by_id
+
+
+def format_marker_locations(locations):
+    if not locations:
+        return "(none)"
+    return ", ".join([f"{loc['line']}:{loc['col']}" for loc in locations])
+
+
+def collect_one_sided_wrapper_issues(markdown_text: str):
+    text = markdown_text or ""
+    issues = []
+    for match in MILESTONE_CORE_TOKEN_RE.finditer(text):
+        comment_id, edge = milestone_match_id_edge(match)
+        if not comment_id or edge not in {"s", "e"}:
+            continue
+
+        left_idx = match.start()
+        while left_idx > 0 and text[left_idx - 1] in {" ", "\t"}:
+            left_idx -= 1
+        has_left_wrapper = left_idx >= 2 and text[left_idx - 2:left_idx] == "=="
+
+        right_idx = match.end()
+        text_len = len(text)
+        while right_idx < text_len and text[right_idx] in {" ", "\t"}:
+            right_idx += 1
+        has_right_wrapper = right_idx + 1 < text_len and text[right_idx:right_idx + 2] == "=="
+
+        if has_left_wrapper == has_right_wrapper:
+            continue
+
+        line_no, col_no = line_col_for_offset(text, match.start())
+        excerpt = line_excerpt(text, line_no)
+        token = "START" if edge == "s" else "END"
+        issue = (
+            f"Comment {comment_id} has one-sided highlight wrapper around {token} marker at "
+            f"{line_no}:{col_no}. Use either plain `///C{comment_id}.{token}///` or fully wrapped "
+            f"`==///C{comment_id}.{token}///==`."
+        )
+        if excerpt:
+            issue += f" Line {line_no}: `{excerpt}`"
+        issues.append(issue)
+    return issues
+
+
+def validate_comment_marker_integrity(source_text: str, normalized_text: str, card_by_id=None, source_label=""):
+    starts_by_id, ends_by_id = collect_span_marker_positions(normalized_text)
+    root_line_by_id = collect_root_card_lines(source_text)
+    for comment_id, card in (card_by_id or {}).items():
+        cid = str(comment_id or "").strip()
+        if not cid:
+            continue
+        if str((card or {}).get("parent") or "").strip():
+            continue
+        root_line_by_id.setdefault(cid, 0)
+
+    issues = []
+    all_ids = set(starts_by_id.keys()) | set(ends_by_id.keys()) | set(root_line_by_id.keys())
+    for comment_id in sorted(all_ids, key=lambda value: (len(value), value)):
+        starts = starts_by_id.get(comment_id, [])
+        ends = ends_by_id.get(comment_id, [])
+        start_count = len(starts)
+        end_count = len(ends)
+        is_root_card = comment_id in root_line_by_id
+
+        if is_root_card and (start_count != 1 or end_count != 1):
+            card_line = int(root_line_by_id.get(comment_id) or 0)
+            card_ref = f"CARD_META line {card_line}" if card_line else "CARD_META line unknown"
+            issues.append(
+                f"Root comment {comment_id} ({card_ref}) must have exactly one START and one END marker; "
+                f"found START={start_count}, END={end_count}."
+            )
+        elif start_count != end_count:
+            issues.append(
+                f"Comment {comment_id} has unbalanced markers; START={start_count} at {format_marker_locations(starts)}, "
+                f"END={end_count} at {format_marker_locations(ends)}."
+            )
+
+        if start_count > 1 or end_count > 1:
+            issues.append(
+                f"Comment {comment_id} has duplicate markers; START lines {format_marker_locations(starts)}, "
+                f"END lines {format_marker_locations(ends)}."
+            )
+
+        if starts and ends and starts[0]["offset"] > ends[-1]["offset"]:
+            issues.append(
+                f"Comment {comment_id} has END before START; first START at {starts[0]['line']}:{starts[0]['col']}, "
+                f"last END at {ends[-1]['line']}:{ends[-1]['col']}."
+            )
+
+        if start_count and not end_count:
+            first_start_line = starts[0]["line"]
+            excerpt = line_excerpt(normalized_text, first_start_line)
+            if excerpt:
+                issues.append(
+                    f"Comment {comment_id} START marker line {first_start_line}: `{excerpt}`"
+                )
+        if end_count and not start_count:
+            first_end_line = ends[0]["line"]
+            excerpt = line_excerpt(normalized_text, first_end_line)
+            if excerpt:
+                issues.append(
+                    f"Comment {comment_id} END marker line {first_end_line}: `{excerpt}`"
+                )
+
+    one_sided_wrapper_issues = collect_one_sided_wrapper_issues(source_text)
+    if one_sided_wrapper_issues:
+        issues.extend(one_sided_wrapper_issues)
+
+    if issues:
+        source_hint = source_label or "<markdown input>"
+        guidance = (
+            "Fix markers by keeping one exact pair per root anchor in prose: "
+            "`///C<ID>.START/// ... ///C<ID>.END///` (optional wrapper: `==///C<ID>.START///==`). "
+            "Ensure each root `CARD_META` entry has a matching marker pair with the same ID."
+        )
+        raise ValueError(
+            "Comment marker validation failed before md->docx conversion.\n"
+            f"Source: {source_hint}\n"
+            + "\n".join([f"- {issue}" for issue in issues])
+            + "\n- "
+            + guidance
+        )
 
 
 def render_pandoc_json_to_markdown(
@@ -2951,8 +3140,6 @@ def convert_md_to_docx(in_md: Path, out_docx: Path, pandoc_extra_args):
         normalized_md = tmp_dir / "normalized.md"
         pandoc_input_md = tmp_dir / "pandoc-input.md"
         text = in_md.read_text(encoding="utf-8")
-        text, _ = repair_unbalanced_comment_markers(text)
-        text, _ = normalize_nested_comment_end_markers(text)
         cleaned, _ = strip_placeholder_shape_images(text)
         sanitized_md.write_text(cleaned, encoding="utf-8")
         _, card_by_id = normalize_milestone_tokens_ast(
@@ -2963,9 +3150,14 @@ def convert_md_to_docx(in_md: Path, out_docx: Path, pandoc_extra_args):
             cwd=in_md.parent,
         )
         normalized_text = normalized_md.read_text(encoding="utf-8")
-        normalized_text, _ = repair_unbalanced_comment_markers(normalized_text)
         normalized_text, _ = normalize_nested_comment_end_markers(normalized_text)
         normalized_md.write_text(normalized_text, encoding="utf-8")
+        validate_comment_marker_integrity(
+            cleaned,
+            normalized_text,
+            card_by_id=card_by_id,
+            source_label=str(in_md),
+        )
 
         comment_data = extract_comment_texts_from_markdown(
             normalized_md,
@@ -2980,7 +3172,6 @@ def convert_md_to_docx(in_md: Path, out_docx: Path, pandoc_extra_args):
             cwd=in_md.parent,
         )
         pandoc_text = pandoc_input_md.read_text(encoding="utf-8")
-        pandoc_text, _ = repair_unbalanced_comment_markers(pandoc_text)
         pandoc_text, _ = normalize_nested_comment_end_markers(pandoc_text)
         pandoc_input_md.write_text(pandoc_text, encoding="utf-8")
 

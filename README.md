@@ -9,9 +9,12 @@ This tool is intentionally focused on comment-safe conversion:
 - `docx -> md`: keeps comment anchors as markdown spans (`.comment-start` / `.comment-end`) with metadata.
 - `md -> docx`: reconstructs comments from markdown spans.
 - `md -> docx`: also accepts shorthand milestone markers in prose and normalizes them to comment spans:
-  - `///c1.START///` / `///c1.END///` (canonical)
+  - `///c1.START///` / `///c1.END///` (canonical inner token)
+  - optional highlighted wrapper: `==///c1.START///==` / `==///c1.END///==`
+  - one-sided wrappers (for example `==///c1.START///` or `///c1.END///==`) are rejected with explicit line diagnostics
   - numeric aliases like `///C1.START///` / `///C1.END///`
   - whitespace-tolerant forms like `/// c1 . start ///`
+  - strict validation: root comments must have exactly one START/END pair; malformed markers fail with line-specific diagnostics.
 - `docx -> md`: emits milestone markers in prose for root comments and inserts card records right after the block that closes the root marker span.
 - Card record format is markdown-friendly and parser-stable:
   - root callout block:

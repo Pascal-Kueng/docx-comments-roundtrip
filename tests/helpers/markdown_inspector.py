@@ -21,8 +21,10 @@ INLINE_IMAGE_RE = re.compile(
     re.DOTALL,
 )
 MILESTONE_TOKEN_RE = re.compile(
-    r"(?:/{3}\s*C(?P<id3c>[0-9][A-Za-z0-9_-]*)\s*\.\s*(?P<edge3c>[sSeE]|[Ss][Tt][Aa][Rr][Tt]|[Ee][Nn][Dd])\s*/{3})"
-    r"|(?:/{3}\s*(?P<id3>[A-Za-z0-9][A-Za-z0-9_-]*)\s*\.\s*(?P<edge3>[sSeE]|[Ss][Tt][Aa][Rr][Tt]|[Ee][Nn][Dd])\s*/{3})"
+    r"(?:(?P<markeq>==)\s*)?"
+    r"(?:/{3}\s*C(?P<id3c>[0-9][A-Za-z0-9_-]*)\s*\.\s*(?P<edge3c>[sSeE]|[Ss][Tt][Aa][Rr][Tt]|[Ee][Nn][Dd])\s*/{3}"
+    r"|/{3}\s*(?P<id3>[A-Za-z0-9][A-Za-z0-9_-]*)\s*\.\s*(?P<edge3>[sSeE]|[Ss][Tt][Aa][Rr][Tt]|[Ee][Nn][Dd])\s*/{3})"
+    r"(?(markeq)\s*==)"
 )
 
 

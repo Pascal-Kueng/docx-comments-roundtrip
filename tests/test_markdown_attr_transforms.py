@@ -133,7 +133,8 @@ class TestMarkdownAttrTransforms(unittest.TestCase):
                 "```text\n"
                 "literal ///c99.START/// should stay untouched in code\n"
                 "```\n\n"
-                "Start /// c1 . START ///alpha///c1.eNd/// and ///c2.s///beta/// c2 . E ///.\n"
+                "Start ==/// c1 . START ///==alpha==///c1.eNd///== and ///c2.s///beta/// c2 . E ///.\n\n"
+                "Regular ==highlight text== should remain highlight.\n"
             ),
             encoding="utf-8",
         )
@@ -151,12 +152,94 @@ class TestMarkdownAttrTransforms(unittest.TestCase):
         self.assertIn("literal ///c99.START/// should stay untouched in code", output)
         self.assertNotIn("/// c1 . START ///", output)
         self.assertNotIn("///c2.s///", output)
+        self.assertNotIn("==[]{.comment-start", output)
+        self.assertNotIn("==[]{.comment-end", output)
+        self.assertIn("Regular ==highlight text== should remain highlight.", output)
 
         attrs = extract_comment_start_attrs(out_md)
         self.assertIn("c1", attrs)
         self.assertIn("c2", attrs)
         self.assertIn('[]{.comment-end id="c1"}', output)
         self.assertIn('[]{.comment-end id="c2"}', output)
+
+    def test_marker_validation_reports_missing_root_end_with_line(self) -> None:
+        validate_markers = self.converter_mod["validate_comment_marker_integrity"]
+        source = (
+            "==///C11.START///== alpha\n\n"
+            "> [!COMMENT 11: Alice (active)]\n"
+            '> <!--CARD_META{#11 "author":"Alice","date":"2026-01-01T00:00:00Z","state":"active"}-->\n'
+            "> body\n"
+        )
+        normalized = '[]{.comment-start id="11"} alpha\n'
+        with self.assertRaises(ValueError) as ctx:
+            validate_markers(
+                source,
+                normalized,
+                card_by_id={"11": {"author": "Alice", "state": "active"}},
+                source_label="broken.md",
+            )
+        message = str(ctx.exception)
+        self.assertIn("broken.md", message)
+        self.assertIn("Root comment 11", message)
+        self.assertIn("START=1, END=0", message)
+        self.assertIn("line 1", message)
+
+    def test_marker_validation_does_not_flag_regular_highlight(self) -> None:
+        validate_markers = self.converter_mod["validate_comment_marker_integrity"]
+        source = "Regular ==highlight== stays as-is.\n"
+        normalized = source
+        validate_markers(source, normalized, card_by_id={}, source_label="ok.md")
+
+    def test_marker_validation_rejects_one_sided_wrapper(self) -> None:
+        validate_markers = self.converter_mod["validate_comment_marker_integrity"]
+        source = (
+            "==///C11.START/// broken anchor ///C11.END///\n\n"
+            "> [!COMMENT 11: Alice (active)]\n"
+            '> <!--CARD_META{#11 "author":"Alice","date":"2026-01-01T00:00:00Z","state":"active"}-->\n'
+            "> body\n"
+        )
+        normalized = '[]{.comment-start id="11"} broken anchor []{.comment-end id="11"}\n'
+        with self.assertRaises(ValueError) as ctx:
+            validate_markers(
+                source,
+                normalized,
+                card_by_id={"11": {"author": "Alice", "state": "active"}},
+                source_label="one-sided.md",
+            )
+        message = str(ctx.exception)
+        self.assertIn("one-sided.md", message)
+        self.assertIn("one-sided highlight wrapper", message)
+        self.assertIn("Comment 11", message)
+
+    def test_marker_validation_allows_plain_or_balanced_wrappers(self) -> None:
+        validate_markers = self.converter_mod["validate_comment_marker_integrity"]
+        normalized = '[]{.comment-start id="11"} blabla []{.comment-end id="11"}\n'
+
+        plain = (
+            "///C11.START/// blabla ///C11.END///\n\n"
+            "> [!COMMENT 11: Alice (active)]\n"
+            '> <!--CARD_META{#11 "author":"Alice","date":"2026-01-01T00:00:00Z","state":"active"}-->\n'
+            "> body\n"
+        )
+        validate_markers(
+            plain,
+            normalized,
+            card_by_id={"11": {"author": "Alice", "state": "active"}},
+            source_label="plain.md",
+        )
+
+        wrapped = (
+            "====///C11.START///== blabla ==///C11.END///====\n\n"
+            "> [!COMMENT 11: Alice (active)]\n"
+            '> <!--CARD_META{#11 "author":"Alice","date":"2026-01-01T00:00:00Z","state":"active"}-->\n'
+            "> body\n"
+        )
+        validate_markers(
+            wrapped,
+            normalized,
+            card_by_id={"11": {"author": "Alice", "state": "active"}},
+            source_label="wrapped.md",
+        )
 
     def test_comment_cards_are_inserted_after_anchor_paragraph(self) -> None:
         emit_cards = self.converter_mod["emit_milestones_and_cards_ast"]
@@ -247,6 +330,8 @@ class TestMarkdownAttrTransforms(unittest.TestCase):
         self.assertGreater(changed, 0)
 
         emitted = md_path.read_text(encoding="utf-8")
+        self.assertIn("==///c1.START///==", emitted)
+        self.assertIn("==///c1.END///==", emitted)
         self.assertIn("///c1.START///", emitted)
         self.assertIn("///c1.END///", emitted)
         self.assertNotIn("///c2.START///", emitted)
