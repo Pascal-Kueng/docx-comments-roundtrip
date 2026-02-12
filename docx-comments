@@ -52,9 +52,13 @@ NESTED_COMMENT_END_WRAPPER_RE = re.compile(
     re.DOTALL,
 )
 KV_ATTR_RE = re.compile(r'([A-Za-z_:][-A-Za-z0-9_:.]*)="([^"]*)"')
-CARD_START_BLOCK_RE = re.compile(
-    r"<!--\s*CARD_START\s*\{\s*#(?P<id>[A-Za-z0-9][A-Za-z0-9_-]*)\s*(?P<attrs>.*?)\}\s*-->",
+CARD_META_INLINE_RE = re.compile(
+    r"<!--\s*CARD_META\s*\{\s*#(?P<id>[A-Za-z0-9][A-Za-z0-9_-]*)\s*(?P<attrs>.*?)\}\s*-->",
     re.DOTALL,
+)
+CARD_HEADER_RE = re.compile(
+    r"^\[!\s*(?P<kind>COMMENT|REPLY)\s+(?P<id>[A-Za-z0-9][A-Za-z0-9_-]*)\s*:\s*(?P<author>.+?)\s*\((?P<state>active|resolved)\)\s*\]$",
+    re.IGNORECASE,
 )
 MILESTONE_TOKEN_RE = re.compile(
     r"(?:/{3}\s*C(?P<id3c>[0-9][A-Za-z0-9_-]*)\s*\.\s*(?P<edge3c>[sSeE]|[Ss][Tt][Aa][Rr][Tt]|[Ee][Nn][Dd])\s*/{3})"
@@ -371,6 +375,77 @@ def milestone_match_id_edge(match: re.Match):
     return comment_id, normalize_milestone_edge(edge_token)
 
 
+def inlines_to_card_text(inlines):
+    parts = []
+
+    def emit(text):
+        if text:
+            parts.append(text)
+
+    def walk_inline(node):
+        if not isinstance(node, dict):
+            return
+        t = node.get("t")
+        c = node.get("c")
+        if t == "Str":
+            emit(c or "")
+        elif t == "Space":
+            emit(" ")
+        elif t in {"SoftBreak", "LineBreak"}:
+            emit("\n")
+        elif t in {"Code", "Math"}:
+            if isinstance(c, list) and c:
+                emit(c[-1] or "")
+            elif isinstance(c, str):
+                emit(c)
+        elif t == "RawInline":
+            if isinstance(c, list) and len(c) >= 2 and isinstance(c[1], str):
+                emit(c[1])
+        elif t == "Span":
+            if isinstance(c, list) and len(c) == 2 and isinstance(c[1], list):
+                for item in c[1]:
+                    walk_inline(item)
+        elif t in {"Emph", "Strong", "Strikeout", "Superscript", "Subscript", "SmallCaps", "Underline"}:
+            if isinstance(c, list):
+                for item in c:
+                    walk_inline(item)
+        elif t == "Quoted":
+            if isinstance(c, list) and len(c) >= 2 and isinstance(c[1], list):
+                quote_type = c[0]
+                quote_name = (
+                    str(quote_type.get("t") or "").strip()
+                    if isinstance(quote_type, dict)
+                    else str(quote_type or "").strip()
+                ).lower()
+                if "single" in quote_name:
+                    open_quote, close_quote = "'", "'"
+                else:
+                    open_quote, close_quote = '"', '"'
+                emit(open_quote)
+                for item in c[1]:
+                    walk_inline(item)
+                emit(close_quote)
+        elif t == "Cite":
+            if isinstance(c, list) and len(c) >= 2 and isinstance(c[1], list):
+                for item in c[1]:
+                    walk_inline(item)
+        elif t in {"Link", "Image"}:
+            if isinstance(c, list) and len(c) >= 2 and isinstance(c[1], list):
+                for item in c[1]:
+                    walk_inline(item)
+        elif isinstance(c, list):
+            for item in c:
+                if isinstance(item, dict):
+                    walk_inline(item)
+
+    for item in inlines or []:
+        walk_inline(item)
+    text = "".join(parts)
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text = re.sub(r"[ \t]+\n", "\n", text)
+    return text
+
+
 def extract_comment_card_text_from_blocks(blocks):
     parts = []
 
@@ -378,12 +453,9 @@ def extract_comment_card_text_from_blocks(blocks):
         line = str(text or "").strip()
         if not line:
             return ""
-        if line.startswith("[!COMMENT ") and "]" in line:
-            tail = line.split("]", 1)[1].strip()
-            return tail
-        if line.startswith("[!COMMENT ") and line.endswith("]"):
+        if CARD_HEADER_RE.match(line):
             return ""
-        if line.startswith("COMMENT ") and ":" in line and line.endswith(")"):
+        if CARD_META_INLINE_RE.search(line):
             return ""
         return line
 
@@ -393,20 +465,20 @@ def extract_comment_card_text_from_blocks(blocks):
         t = block.get("t")
         c = block.get("c")
         if t in {"Para", "Plain"} and isinstance(c, list):
-            line = normalize_card_line(inlines_to_text(c))
+            line = normalize_card_line(inlines_to_card_text(c))
             if line:
                 parts.append(line)
         elif t == "Header" and isinstance(c, list) and len(c) >= 3 and isinstance(c[2], list):
-            line = inlines_to_text(c[2])
+            line = inlines_to_card_text(c[2])
             if line:
                 parts.append(line)
         elif t == "RawBlock" and isinstance(c, list) and len(c) == 2:
-            # CARD_START metadata markers are transport-only.
-            continue
-        elif t == "BlockQuote" and isinstance(c, list):
-            nested = extract_comment_card_text_from_blocks(c)
-            if nested:
-                parts.append(nested)
+            raw = str(c[1] or "")
+            if CARD_META_INLINE_RE.search(raw):
+                continue
+            line = normalize_card_line(raw)
+            if line:
+                parts.append(line)
         elif t == "Div" and isinstance(c, list) and len(c) == 2 and isinstance(c[1], list):
             nested = extract_comment_card_text_from_blocks(c[1])
             if nested:
@@ -414,8 +486,8 @@ def extract_comment_card_text_from_blocks(blocks):
     return "\n\n".join([p for p in parts if p]).strip()
 
 
-def parse_card_start_marker(raw_html: str):
-    match = CARD_START_BLOCK_RE.search(raw_html or "")
+def parse_card_meta_marker(raw_html: str):
+    match = CARD_META_INLINE_RE.search(raw_html or "")
     if not match:
         return "", {}
     comment_id = str(match.group("id") or "").strip()
@@ -434,14 +506,13 @@ def parse_card_start_marker(raw_html: str):
     return comment_id, meta
 
 
-def build_card_start_marker(comment_id: str, meta: dict):
+def build_card_meta_marker(comment_id: str, meta: dict):
     attrs = []
     for key in [
         "author",
         "date",
         "parent",
         "state",
-        "anchor",
         "paraId",
         "durableId",
         "presenceProvider",
@@ -451,20 +522,187 @@ def build_card_start_marker(comment_id: str, meta: dict):
         if value:
             attrs.append(f"{json.dumps(key)}:{json.dumps(value, ensure_ascii=False)}")
     attrs_part = (" " + ",".join(attrs)) if attrs else ""
-    return f"<!--CARD_START{{#{comment_id}{attrs_part}}}-->"
+    return f"<!--CARD_META{{#{comment_id}{attrs_part}}}-->"
+
+
+def parse_comment_callout_header(line: str):
+    match = CARD_HEADER_RE.match(str(line or "").strip())
+    if not match:
+        return {}
+    return {
+        "kind": str(match.group("kind") or "").strip().upper(),
+        "id": str(match.group("id") or "").strip(),
+        "author": str(match.group("author") or "").strip(),
+        "state": parse_state_token(match.group("state")),
+    }
+
+
+def parse_comment_card_payload_text(payload_text: str, parent_hint=""):
+    lines = str(payload_text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    header_idx = None
+    header = {}
+    for idx, line in enumerate(lines):
+        if not str(line or "").strip():
+            continue
+        parsed = parse_comment_callout_header(line)
+        if parsed:
+            header_idx = idx
+            header = parsed
+            break
+    if header_idx is None:
+        return "", {}, "", ""
+
+    meta_line_idx = None
+    meta_comment_id = ""
+    meta = {}
+    for idx, line in enumerate(lines):
+        candidate_id, candidate_meta = parse_card_meta_marker(line)
+        if candidate_id:
+            meta_line_idx = idx
+            meta_comment_id = candidate_id
+            meta = candidate_meta
+            break
+
+    comment_id = str(meta_comment_id or header.get("id") or "").strip()
+    if not comment_id:
+        return "", {}, "", ""
+
+    out_meta = {}
+    for key in [
+        "author",
+        "date",
+        "parent",
+        "state",
+        "paraId",
+        "durableId",
+        "presenceProvider",
+        "presenceUserId",
+    ]:
+        value = str(meta.get(key) or "").strip()
+        if value:
+            out_meta[key] = value
+
+    out_meta.setdefault("author", str(header.get("author") or "").strip())
+    out_meta["state"] = parse_state_token(out_meta.get("state") or header.get("state"))
+    if header.get("kind") == "REPLY" and parent_hint and not out_meta.get("parent"):
+        out_meta["parent"] = str(parent_hint).strip()
+
+    body_lines = []
+    for idx, line in enumerate(lines):
+        if idx == header_idx or idx == meta_line_idx:
+            continue
+        body_lines.append(line)
+    body_text = normalize_markdown_comment_text("\n".join(body_lines))
+    return comment_id, out_meta, str(header.get("kind") or ""), body_text
+
+
+def parse_comment_card_blockquote(block, parent_hint=""):
+    if not (isinstance(block, dict) and block.get("t") == "BlockQuote"):
+        return []
+    quote_blocks = block.get("c")
+    if not isinstance(quote_blocks, list) or not quote_blocks:
+        return []
+
+    primary_idx = None
+    primary_block = None
+    for idx, candidate in enumerate(quote_blocks):
+        if not isinstance(candidate, dict):
+            continue
+        if candidate.get("t") in {"Para", "Plain", "Header", "RawBlock"}:
+            primary_idx = idx
+            primary_block = candidate
+            break
+    if primary_block is None:
+        return []
+
+    if primary_block.get("t") == "Header":
+        payload = inlines_to_card_text(primary_block.get("c", [None, None, []])[2])
+    elif primary_block.get("t") == "RawBlock":
+        c = primary_block.get("c")
+        fmt = str(c[0] or "").strip().lower() if isinstance(c, list) and len(c) == 2 else ""
+        payload = str(c[1] or "") if fmt in {"markdown", "md"} else ""
+    else:
+        payload = inlines_to_card_text(primary_block.get("c"))
+
+    comment_id, meta, kind, body_text = parse_comment_card_payload_text(payload, parent_hint=parent_hint)
+    if not comment_id or kind not in {"COMMENT", "REPLY"}:
+        return []
+
+    detected_meta = {}
+    detected_meta_id = ""
+    for quote_block in quote_blocks:
+        if not isinstance(quote_block, dict):
+            continue
+        qtype = quote_block.get("t")
+        qdata = quote_block.get("c")
+        marker_id = ""
+        marker_meta = {}
+        if qtype == "RawBlock" and isinstance(qdata, list) and len(qdata) == 2:
+            fmt = str(qdata[0] or "").strip().lower()
+            if fmt == "html":
+                marker_id, marker_meta = parse_card_meta_marker(str(qdata[1] or ""))
+        elif qtype in {"Para", "Plain"} and isinstance(qdata, list):
+            marker_id, marker_meta = parse_card_meta_marker(inlines_to_card_text(qdata))
+        elif qtype == "Header" and isinstance(qdata, list) and len(qdata) >= 3 and isinstance(qdata[2], list):
+            marker_id, marker_meta = parse_card_meta_marker(inlines_to_card_text(qdata[2]))
+        if marker_id:
+            if not detected_meta_id:
+                detected_meta_id = marker_id
+            if marker_id == comment_id or not comment_id:
+                detected_meta.update(marker_meta)
+
+    if detected_meta_id and detected_meta_id != comment_id:
+        comment_id = detected_meta_id
+    for key in [
+        "author",
+        "date",
+        "parent",
+        "state",
+        "paraId",
+        "durableId",
+        "presenceProvider",
+        "presenceUserId",
+    ]:
+        value = str(detected_meta.get(key) or "").strip()
+        if value and not meta.get(key):
+            meta[key] = value
+    meta["state"] = parse_state_token(meta.get("state"))
+    if kind == "REPLY" and parent_hint and not meta.get("parent"):
+        meta["parent"] = str(parent_hint).strip()
+
+    parts = []
+    if body_text:
+        parts.append(body_text)
+    for idx, quote_block in enumerate(quote_blocks):
+        if idx == primary_idx or not isinstance(quote_block, dict):
+            continue
+        if quote_block.get("t") == "BlockQuote":
+            continue
+        extra = extract_comment_card_text_from_blocks([quote_block])
+        if extra:
+            parts.append(extra)
+    meta["text"] = "\n\n".join([part for part in parts if part]).strip()
+
+    entries = [(comment_id, meta)]
+    for quote_block in quote_blocks:
+        if not isinstance(quote_block, dict) or quote_block.get("t") != "BlockQuote":
+            continue
+        entries.extend(parse_comment_card_blockquote(quote_block, parent_hint=comment_id))
+    return entries
 
 
 def normalize_card_layout_text(text: str) -> str:
     out = str(text or "")
-    # Keep card marker directly above the callout header.
+    # Keep callout headers directly above metadata lines.
     out = re.sub(
-        r"(<!--CARD_START\{#[^\n]*\}-->)\n[ \t]*\n(> \[!COMMENT[^\n]*\])",
-        r"\1\n\2",
+        r"(^>+\s*\[!(?:COMMENT|REPLY)[^\n]*\])\n>+[ \t]*\n(?=>+[ \t]*<!--CARD_META)",
+        r"\1\n",
         out,
+        flags=re.MULTILINE,
     )
-    # Keep callout header directly above comment body (no blank quote line).
+    # Keep metadata lines directly above body lines.
     out = re.sub(
-        r"(^> \[!COMMENT[^\n]*\])\n>[ \t]*\n(?=>[ \t]*\S)",
+        r"(^>+[ \t]*<!--CARD_META\{#[^\n]*\}-->)\n>+[ \t]*\n(?=>+[ \t]*\S)",
         r"\1\n",
         out,
         flags=re.MULTILINE,
@@ -488,37 +726,64 @@ def parse_comment_cards_from_doc(doc):
                 continue
             t = block.get("t")
             c = block.get("c")
-            if t == "RawBlock" and isinstance(c, list) and len(c) == 2:
-                fmt = str(c[0] or "").strip().lower()
-                raw = str(c[1] or "")
-                comment_id, meta = parse_card_start_marker(raw) if fmt == "html" else ("", {})
-                if comment_id:
-                    body_blocks = []
-                    if idx + 1 < len(blocks or []):
-                        next_block = blocks[idx + 1]
-                        if isinstance(next_block, dict) and next_block.get("t") == "BlockQuote":
-                            quote_blocks = next_block.get("c")
-                            body_blocks = quote_blocks if isinstance(quote_blocks, list) else []
-                            idx += 1
-                    card_by_id[comment_id] = {
-                        "author": str(meta.get("author") or "").strip(),
-                        "date": str(meta.get("date") or "").strip(),
-                        "parent": str(meta.get("parent") or "").strip(),
-                        "state": parse_state_token(meta.get("state")),
-                        "paraId": str(meta.get("paraId") or "").strip(),
-                        "durableId": str(meta.get("durableId") or "").strip(),
-                        "presenceProvider": str(meta.get("presenceProvider") or "").strip(),
-                        "presenceUserId": str(meta.get("presenceUserId") or "").strip(),
-                        "anchor": str(meta.get("anchor") or "").strip(),
-                        "text": extract_comment_card_text_from_blocks(body_blocks),
-                    }
-                    removed += 1
+            if t == "BlockQuote":
+                entries = parse_comment_card_blockquote(block, parent_hint="")
+                if entries:
+                    for comment_id, meta in entries:
+                        if not comment_id:
+                            continue
+                        card_by_id[comment_id] = {
+                            "author": str(meta.get("author") or "").strip(),
+                            "date": str(meta.get("date") or "").strip(),
+                            "parent": str(meta.get("parent") or "").strip(),
+                            "state": parse_state_token(meta.get("state")),
+                            "paraId": str(meta.get("paraId") or "").strip(),
+                            "durableId": str(meta.get("durableId") or "").strip(),
+                            "presenceProvider": str(meta.get("presenceProvider") or "").strip(),
+                            "presenceUserId": str(meta.get("presenceUserId") or "").strip(),
+                            "anchor": str(meta.get("anchor") or "").strip(),
+                            "text": normalize_markdown_comment_text(meta.get("text") or ""),
+                        }
+                        removed += 1
                     idx += 1
                     continue
-            if t == "Div" and isinstance(c, list) and len(c) == 2 and isinstance(c[1], list):
+                if isinstance(c, list):
+                    block["c"] = process_blocks(c)
+            elif t == "Div" and isinstance(c, list) and len(c) == 2 and isinstance(c[1], list):
                 block["c"][1] = process_blocks(c[1])
-            elif t == "BlockQuote" and isinstance(c, list):
-                block["c"] = process_blocks(c)
+            elif t in {"BulletList", "OrderedList"} and isinstance(c, list):
+                items = c if t == "BulletList" else (c[1] if len(c) > 1 else [])
+                for item in items:
+                    if isinstance(item, list):
+                        item[:] = process_blocks(item)
+            elif t == "DefinitionList" and isinstance(c, list):
+                for _, defs in c:
+                    for d in defs:
+                        if isinstance(d, list):
+                            d[:] = process_blocks(d)
+            elif t == "Table" and isinstance(c, list):
+                for item in c:
+                    if isinstance(item, list):
+                        for maybe_block in item:
+                            if isinstance(maybe_block, dict) and maybe_block.get("t") == "BlockQuote":
+                                maybe_entries = parse_comment_card_blockquote(maybe_block, parent_hint="")
+                                if maybe_entries:
+                                    for comment_id, meta in maybe_entries:
+                                        if not comment_id:
+                                            continue
+                                        card_by_id[comment_id] = {
+                                            "author": str(meta.get("author") or "").strip(),
+                                            "date": str(meta.get("date") or "").strip(),
+                                            "parent": str(meta.get("parent") or "").strip(),
+                                            "state": parse_state_token(meta.get("state")),
+                                            "paraId": str(meta.get("paraId") or "").strip(),
+                                            "durableId": str(meta.get("durableId") or "").strip(),
+                                            "presenceProvider": str(meta.get("presenceProvider") or "").strip(),
+                                            "presenceUserId": str(meta.get("presenceUserId") or "").strip(),
+                                            "anchor": str(meta.get("anchor") or "").strip(),
+                                            "text": normalize_markdown_comment_text(meta.get("text") or ""),
+                                        }
+                                        removed += 1
             kept.append(block)
             idx += 1
         return kept
@@ -711,22 +976,25 @@ def rewrite_milestone_tokens_in_doc(doc, card_by_id=None):
     return changed
 
 
-def build_comment_card_blocks(comment_id: str, meta: dict):
-    marker = build_card_start_marker(comment_id, meta)
-    text = str((meta or {}).get("text") or "").strip()
-    lines = text.splitlines() if text else [""]
-    author = str((meta or {}).get("author") or "").strip() or "Unknown"
-    state = parse_state_token((meta or {}).get("state"))
-    header_text = f"[!COMMENT {comment_id}: {author} ({state})]"
+def build_comment_card_blockquote(comment_id: str, meta: dict, children=None):
+    local_meta = dict(meta or {})
+    author = str(local_meta.get("author") or "").strip() or "Unknown"
+    state = parse_state_token(local_meta.get("state"))
+    kind = "REPLY" if str(local_meta.get("parent") or "").strip() else "COMMENT"
+    header_text = f"[!{kind} {comment_id}: {author} ({state})]"
+    marker_text = build_card_meta_marker(comment_id, local_meta)
+    body_text = normalize_markdown_comment_text(local_meta.get("text") or "")
+
     quote_blocks = [
         {"t": "RawBlock", "c": ["markdown", header_text]},
+        {"t": "RawBlock", "c": ["html", marker_text]},
     ]
-    for line in lines:
-        quote_blocks.append({"t": "Para", "c": text_to_pandoc_inlines(line)})
-    return [
-        {"t": "RawBlock", "c": ["html", marker]},
-        {"t": "BlockQuote", "c": quote_blocks},
-    ]
+    if body_text:
+        quote_blocks.append({"t": "RawBlock", "c": ["markdown", body_text]})
+    for child in children or []:
+        if isinstance(child, dict):
+            quote_blocks.append(child)
+    return {"t": "BlockQuote", "c": quote_blocks}
 
 
 def rewrite_comment_spans_to_milestones_in_doc(doc, child_ids=None):
@@ -863,23 +1131,24 @@ def emit_milestones_and_cards_ast(
         for parent, children in children_by_parent.items():
             children.sort(key=lambda x: order_index.get(x, 10**9))
 
-        def build_thread_blocks(comment_id, seen=None):
+        def build_thread_blockquote(comment_id, seen=None):
             if seen is None:
                 seen = set()
             if comment_id in seen:
-                return []
+                return None
             seen.add(comment_id)
             meta = dict(cards_meta_by_id.get(comment_id) or {})
-            if anchor_by_id.get(comment_id):
-                meta.setdefault("anchor", anchor_by_id.get(comment_id))
-            blocks = build_comment_card_blocks(comment_id, meta)
+            children = []
             for child_id in children_by_parent.get(comment_id, []):
-                blocks.extend(build_thread_blocks(child_id, seen=seen))
-            return blocks
+                child_block = build_thread_blockquote(child_id, seen=seen)
+                if child_block is not None:
+                    children.append(child_block)
+            return build_comment_card_blockquote(comment_id, meta, children=children)
 
         cards_by_root_id = {}
         for root_id in start_order:
-            cards_by_root_id[root_id] = build_thread_blocks(root_id, seen=set())
+            root_block = build_thread_blockquote(root_id, seen=set())
+            cards_by_root_id[root_id] = [root_block] if root_block is not None else []
 
         marker_order = []
 
@@ -1283,6 +1552,13 @@ def normalize_markdown_comment_text(text: str) -> str:
     text = re.sub(r"\\+[ \t]*\n", "\n", text)
     # Handle wrapped hard-break output forms like "\\ " conservatively.
     text = re.sub(r"\\\\[ \t]+", "\n", text)
+    text = (
+        text.replace("\u2018", "'")
+        .replace("\u2019", "'")
+        .replace("\u201c", '"')
+        .replace("\u201d", '"')
+    )
+    text = re.sub(r"(?m)^[\u2014\u2015]\s*$", "---", text)
     return text.strip()
 
 

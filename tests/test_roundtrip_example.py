@@ -167,8 +167,8 @@ class TestPreregistrationRoundtrip(unittest.TestCase):
         markdown_text_for_mode = intermediate_md.read_text(encoding="utf-8")
         if not MILESTONE_TOKEN_RE.search(markdown_text_for_mode):
             errors.append("Markdown does not contain readable milestone markers (///...START/END///).")
-        if "<!--CARD_START{#" not in markdown_text_for_mode:
-            errors.append("Markdown does not contain CARD_START comment cards.")
+        if "<!--CARD_META{#" not in markdown_text_for_mode:
+            errors.append("Markdown does not contain CARD_META comment cards.")
 
         for root_id in expected_from_original.root_ids_order:
             expected_from_orig_text = expected_from_original.flattened_by_root.get(root_id, "")

@@ -51,10 +51,15 @@ Additionally accepted on md->docx input:
   - `///c1.START///` (start), `///c1.END///` (end) as canonical form
   - numeric aliases: `///C1.START///` / `///C1.END///`
   - whitespace-tolerant variants: `/// c1 . start ///`
-- In docx->md output, each root/thread comment also gets a `CARD_START` marker inserted directly after the block that contains its root end marker (not batched at document end):
-  - `<!--CARD_START{#<id> "author":"...","date":"...","state":"...","parent":"..."}-->`
-- Card body format is intentionally human-readable: blockquote callout header (`[!COMMENT <id>: <author> (<state>)]`) followed by comment body text.
-- Only root comments keep inline milestone markers in prose; reply comments are represented as additional `CARD_START` records with `parent` metadata.
+- In docx->md output, each root comment gets a blockquote callout inserted directly after the block that contains its root end marker (not batched at document end):
+  - `> [!COMMENT <id>: <author> (<state>)]`
+  - `> <!--CARD_META{#<id> "author":"...","date":"...","state":"..."}-->`
+  - `> <root comment body>`
+- Replies are nested inside the root callout as nested blockquotes:
+  - `> > [!REPLY <id>: <author> (<state>)]`
+  - `> > <!--CARD_META{#<id> "author":"...","date":"...","parent":"<root-id>","state":"..."}-->`
+  - `> > <reply body>`
+- Only root comments keep inline milestone markers in prose; reply anchors are carried by nested reply callouts.
 - These are AST-normalized to canonical span markers before extraction.
 
 Internal transport metadata (docx->md->docx only; must be stripped before pandoc md->docx):
@@ -207,3 +212,4 @@ When changing comment logic, update both converter and tests in the same PR:
 - AST re-serialization preserves user-requested writer when available (`-t/--to` passthrough).
 - Comment marker IDs are normalized to `id="..."` attributes after AST operations to keep downstream marker repair stable.
 - md->docx now normalizes shorthand milestone tokens (`///<id>.START|END///`, spacing tolerant) to canonical comment spans via Pandoc AST before comment extraction.
+- Current markdown card transport format is `COMMENT/REPLY` blockquote callouts with inline `CARD_META` HTML comments (no `CARD_START` markers, no fenced Div wrappers, no backward-compat parsing path).

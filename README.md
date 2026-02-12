@@ -14,10 +14,14 @@ This tool is intentionally focused on comment-safe conversion:
   - whitespace-tolerant forms like `/// c1 . start ///`
 - `docx -> md`: emits milestone markers in prose for root comments and inserts card records right after the block that closes the root marker span.
 - Card record format is markdown-friendly and parser-stable:
-  - `<!--CARD_START{#<id> ...}-->` (metadata)
-  - blockquote callout header `>[!COMMENT <id>: <author> (<state>)]`
-  - quoted comment body text
-- Thread replies are represented as additional card records with `parent` metadata (no fenced Div wrappers).
+  - root callout block:
+    - `> [!COMMENT <id>: <author> (<state>)]`
+    - `> <!--CARD_META{#<id> ...}-->`
+    - `> <comment body>`
+  - nested reply callouts inside the root block:
+    - `> > [!REPLY <id>: <author> (<state>)]`
+    - `> > <!--CARD_META{#<id> ... "parent":"<root-id>"}-->`
+    - `> > <reply body>`
 - Threaded Word replies are flattened into the parent comment body for stable roundtrip output.
 - Comment state is preserved for roots (`active` vs `resolved`).
 - Known pandoc shape-placeholder image artifacts are filtered out of markdown.
