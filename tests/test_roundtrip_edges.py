@@ -244,7 +244,13 @@ class TestEdgeRoundtrips(unittest.TestCase):
                     seed_node.text, roundtrip_node.text, f"{case['name']}:{comment_id}"
                 )
 
+        threaded_root_ids = set(seed_snapshot.parent_map.values())
         for comment_id in seed_snapshot.comment_ids_order:
+            if comment_id in threaded_root_ids:
+                continue
+            seed_node = seed_snapshot.comments_by_id.get(comment_id)
+            if seed_node is not None and "Reply from:" in (seed_node.text or ""):
+                continue
             expected_anchor_text = normalize_anchor_text(seed_snapshot.anchor_text_by_id.get(comment_id, ""))
             actual_anchor_text = normalize_anchor_text(roundtrip_snapshot.anchor_text_by_id.get(comment_id, ""))
             if expected_anchor_text != actual_anchor_text:

@@ -121,3 +121,186 @@ class TestMarkdownAttrTransforms(unittest.TestCase):
         self.assertTrue(all(not arg.startswith("--to") for arg in filtered))
         self.assertTrue(all(not arg.startswith("--output") for arg in filtered))
         self.assertTrue(all(not arg.startswith("--extract-media") for arg in filtered))
+
+    def test_milestone_tokens_expand_with_flexible_spacing(self) -> None:
+        normalize_tokens = self.converter_mod["normalize_milestone_tokens_ast"]
+        work_dir = Path(tempfile.mkdtemp(prefix="ast-milestone-", dir="/tmp"))
+        in_md = work_dir / "input.md"
+        out_md = work_dir / "output.md"
+        in_md.write_text(
+            (
+                "```text\n"
+                "literal DC_COMMENT(c99.s) should stay untouched in code\n"
+                "```\n\n"
+                "Start DC_COMMENT( c1 . s )alphaDC_COMMENT(c1.e) and DC_COMMENT(dc:c2.s)betaDC_COMMENT( c2 . e ).\n"
+            ),
+            encoding="utf-8",
+        )
+
+        replaced, _ = normalize_tokens(
+            in_md,
+            out_md,
+            pandoc_extra_args=None,
+            writer_format="markdown",
+            cwd=work_dir,
+        )
+        self.assertEqual(replaced, 4)
+
+        output = out_md.read_text(encoding="utf-8")
+        self.assertIn("literal DC_COMMENT(c99.s) should stay untouched in code", output)
+        self.assertNotIn("DC_COMMENT( c1 . s )", output)
+        self.assertNotIn("DC_COMMENT(dc:c2.s)", output)
+
+        attrs = extract_comment_start_attrs(out_md)
+        self.assertIn("c1", attrs)
+        self.assertIn("c2", attrs)
+        self.assertIn('[]{.comment-end id="c1"}', output)
+        self.assertIn('[]{.comment-end id="c2"}', output)
+
+    def test_comment_cards_are_inserted_after_anchor_paragraph(self) -> None:
+        emit_cards = self.converter_mod["emit_milestones_and_cards_ast"]
+        run_pandoc_json = self.converter_mod["run_pandoc_json"]
+
+        work_dir = Path(tempfile.mkdtemp(prefix="ast-card-placement-", dir="/tmp"))
+        md_path = work_dir / "input.md"
+        md_path.write_text(
+            (
+                "[Alpha]{.comment-start id=\"c1\" author=\"Alice\" date=\"2026-01-01T00:00:00Z\"} "
+                "text[]{.comment-end id=\"c1\"}.\n\n"
+                "Second paragraph.\n"
+            ),
+            encoding="utf-8",
+        )
+
+        changed, card_count = emit_cards(
+            md_path,
+            comment_cards_by_id={
+                "c1": {
+                    "author": "Alice",
+                    "date": "2026-01-01T00:00:00Z",
+                    "state": "active",
+                    "text": "Comment body",
+                }
+            },
+            child_ids=set(),
+            pandoc_extra_args=None,
+            writer_format="markdown",
+            cwd=work_dir,
+        )
+        self.assertGreater(changed, 0)
+        self.assertEqual(card_count, 1)
+
+        doc = run_pandoc_json(md_path, fmt_from="markdown", extra_args=None)
+        blocks = [b for b in doc.get("blocks", []) if isinstance(b, dict)]
+        self.assertGreaterEqual(len(blocks), 3)
+        self.assertEqual(blocks[0].get("t"), "Para")
+        self.assertEqual(blocks[1].get("t"), "Div")
+        self.assertEqual(blocks[2].get("t"), "Para")
+        div_attr = blocks[1].get("c", [[], []])[0]
+        self.assertEqual(div_attr[0], "c1")
+        self.assertIn("comment-card", div_attr[1])
+
+    def test_reply_markers_move_to_cards_only(self) -> None:
+        emit_cards = self.converter_mod["emit_milestones_and_cards_ast"]
+        normalize_tokens = self.converter_mod["normalize_milestone_tokens_ast"]
+        extract_comments = self.converter_mod["extract_comment_texts_from_markdown"]
+
+        work_dir = Path(tempfile.mkdtemp(prefix="ast-reply-cards-", dir="/tmp"))
+        md_path = work_dir / "input.md"
+        normalized_path = work_dir / "normalized.md"
+        md_path.write_text(
+            (
+                "[Root]{.comment-start id=\"c1\" author=\"Alice\" date=\"2026-01-01T00:00:00Z\"}"
+                " body "
+                "[Reply anchor]{.comment-start id=\"c2\" author=\"Bob\" date=\"2026-01-01T01:00:00Z\" parent=\"c1\"}"
+                "text[]{.comment-end id=\"c2\"}"
+                " end[]{.comment-end id=\"c1\"}.\n"
+            ),
+            encoding="utf-8",
+        )
+
+        changed, _ = emit_cards(
+            md_path,
+            comment_cards_by_id={
+                "c1": {
+                    "author": "Alice",
+                    "date": "2026-01-01T00:00:00Z",
+                    "state": "active",
+                    "text": "Root body",
+                },
+                "c2": {
+                    "author": "Bob",
+                    "date": "2026-01-01T01:00:00Z",
+                    "parent": "c1",
+                    "state": "active",
+                    "text": "Reply body",
+                },
+            },
+            child_ids={"c2"},
+            pandoc_extra_args=None,
+            writer_format="markdown",
+            cwd=work_dir,
+        )
+        self.assertGreater(changed, 0)
+
+        emitted = md_path.read_text(encoding="utf-8")
+        self.assertIn("DC_COMMENT(c1.s)", emitted)
+        self.assertIn("DC_COMMENT(c1.e)", emitted)
+        self.assertNotIn("DC_COMMENT(c2.s)", emitted)
+        self.assertNotIn("DC_COMMENT(c2.e)", emitted)
+        self.assertIn('{#c2 .comment-card .comment-reply-card', emitted)
+
+        replaced, card_by_id = normalize_tokens(
+            md_path,
+            normalized_path,
+            pandoc_extra_args=None,
+            writer_format="markdown",
+            cwd=work_dir,
+        )
+        self.assertGreaterEqual(replaced, 2)
+        self.assertIn("c2", card_by_id)
+        self.assertEqual(card_by_id["c2"].get("parent"), "c1")
+
+        comment_data = extract_comments(normalized_path, pandoc_extra_args=None, card_by_id=card_by_id)
+        self.assertIn("c2", comment_data["child_ids"])
+        self.assertEqual(comment_data["parent_by_id"].get("c2"), "c1")
+        self.assertIn("Reply from: Bob", comment_data["flattened_by_id"].get("c1", ""))
+
+    def test_root_end_marker_stays_before_card_block(self) -> None:
+        emit_cards = self.converter_mod["emit_milestones_and_cards_ast"]
+
+        work_dir = Path(tempfile.mkdtemp(prefix="ast-end-before-card-", dir="/tmp"))
+        md_path = work_dir / "input.md"
+        md_path.write_text(
+            (
+                "[Alpha]{.comment-start id=\"c1\" author=\"Alice\" date=\"2026-01-01T00:00:00Z\"}"
+                " first paragraph.\n\n"
+                "Second paragraph[]{.comment-end id=\"c1\"}.\n"
+            ),
+            encoding="utf-8",
+        )
+
+        changed, card_count = emit_cards(
+            md_path,
+            comment_cards_by_id={
+                "c1": {
+                    "author": "Alice",
+                    "date": "2026-01-01T00:00:00Z",
+                    "state": "active",
+                    "text": "Card body",
+                }
+            },
+            child_ids=set(),
+            pandoc_extra_args=None,
+            writer_format="markdown",
+            cwd=work_dir,
+        )
+        self.assertGreater(changed, 0)
+        self.assertEqual(card_count, 1)
+
+        output = md_path.read_text(encoding="utf-8")
+        end_pos = output.find("DC_COMMENT(c1.e)")
+        card_pos = output.find("{#c1 .comment-card")
+        self.assertNotEqual(end_pos, -1)
+        self.assertNotEqual(card_pos, -1)
+        self.assertLess(end_pos, card_pos)

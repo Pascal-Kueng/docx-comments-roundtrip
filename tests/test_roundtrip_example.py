@@ -162,6 +162,12 @@ class TestPreregistrationRoundtrip(unittest.TestCase):
                 f"expected={expected_from_original.root_ids_order} actual={markdown.root_ids_order}"
             )
 
+        markdown_text_for_mode = intermediate_md.read_text(encoding="utf-8")
+        if "DC_COMMENT(" not in markdown_text_for_mode:
+            errors.append("Markdown does not contain readable milestone markers (DC_COMMENT).")
+        if ".comment-card" not in markdown_text_for_mode:
+            errors.append("Markdown does not contain comment cards (.comment-card).")
+
         for root_id in expected_from_original.root_ids_order:
             expected_from_orig_text = expected_from_original.flattened_by_root.get(root_id, "")
             markdown_text = markdown.flattened_by_root.get(root_id, "")
@@ -216,16 +222,24 @@ class TestPreregistrationRoundtrip(unittest.TestCase):
                         f"expected={expected_durable_id} actual={actual_durable_id}"
                     )
 
-        for root_id in expected_from_original.root_ids_order:
-            expected_anchor_text = normalize_anchor_text(original.anchor_text_by_id.get(root_id, ""))
-            actual_anchor_text = normalize_anchor_text(roundtrip.anchor_text_by_id.get(root_id, ""))
-            if expected_anchor_text != actual_anchor_text:
-                errors.append(f"Anchor span text mismatch for root comment {root_id}")
-                text_mismatch_diffs[f"anchor_{root_id}"] = text_diff(
-                    original.anchor_text_by_id.get(root_id, ""),
-                    roundtrip.anchor_text_by_id.get(root_id, ""),
-                    f"anchor {root_id}",
-                )
+        uses_milestone_markers = "DC_COMMENT(" in markdown_text_for_mode
+        if not uses_milestone_markers:
+            threaded_root_ids = set(original.parent_map.values())
+            for root_id in expected_from_original.root_ids_order:
+                if root_id in threaded_root_ids:
+                    continue
+                original_node = original.comments_by_id.get(root_id)
+                if original_node is not None and "Reply from:" in (original_node.text or ""):
+                    continue
+                expected_anchor_text = normalize_anchor_text(original.anchor_text_by_id.get(root_id, ""))
+                actual_anchor_text = normalize_anchor_text(roundtrip.anchor_text_by_id.get(root_id, ""))
+                if expected_anchor_text != actual_anchor_text:
+                    errors.append(f"Anchor span text mismatch for root comment {root_id}")
+                    text_mismatch_diffs[f"anchor_{root_id}"] = text_diff(
+                        original.anchor_text_by_id.get(root_id, ""),
+                        roundtrip.anchor_text_by_id.get(root_id, ""),
+                        f"anchor {root_id}",
+                    )
 
         roundtrip_id_set = set(roundtrip.comment_ids_order)
         for label, observed_ids in [

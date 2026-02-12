@@ -52,6 +52,10 @@ NESTED_COMMENT_END_WRAPPER_RE = re.compile(
     re.DOTALL,
 )
 KV_ATTR_RE = re.compile(r'([A-Za-z_:][-A-Za-z0-9_:.]*)="([^"]*)"')
+MILESTONE_TOKEN_RE = re.compile(
+    r"(?:DC_COMMENT\(\s*(?:dc\s*:\s*)?(?P<id1>[A-Za-z0-9][A-Za-z0-9_-]*)\s*\.\s*(?P<edge1>[sSeE])\s*\))"
+    r"|(?:\{\[\s*(?:dc\s*:\s*)?(?P<id2>[A-Za-z0-9][A-Za-z0-9_-]*)\s*\.\s*(?P<edge2>[sSeE])\s*\]\})"
+)
 INLINE_IMAGE_RE = re.compile(
     r'!\[(?P<alt>[^\]]*)\]\((?P<src>[^)\s]+)(?:\s+"(?P<title>[^"]*)")?\)\{(?P<attrs>[^}]*)\}',
     re.DOTALL,
@@ -302,6 +306,659 @@ def walk_pandoc_spans(doc, span_handler):
 
     walk_blocks(doc.get("blocks", []))
     return changed
+
+
+def text_to_pandoc_inlines(text: str):
+    if not text:
+        return []
+    out = []
+    i = 0
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if ch == "\n":
+            out.append({"t": "SoftBreak"})
+            i += 1
+            continue
+        if ch.isspace():
+            while i < n and text[i].isspace() and text[i] != "\n":
+                i += 1
+            out.append({"t": "Space"})
+            continue
+        j = i
+        while j < n and (not text[j].isspace()) and text[j] != "\n":
+            j += 1
+        out.append({"t": "Str", "c": text[i:j]})
+        i = j
+    return out
+
+
+def milestone_marker_inline(comment_id: str, edge: str):
+    return {"t": "Str", "c": f"DC_COMMENT({comment_id}.{edge})"}
+
+
+def extract_comment_card_text_from_blocks(blocks):
+    parts = []
+    for block in blocks or []:
+        if not isinstance(block, dict):
+            continue
+        t = block.get("t")
+        c = block.get("c")
+        if t in {"Para", "Plain"} and isinstance(c, list):
+            line = inlines_to_text(c)
+            if line:
+                parts.append(line)
+        elif t == "Header" and isinstance(c, list) and len(c) >= 3 and isinstance(c[2], list):
+            line = inlines_to_text(c[2])
+            if line:
+                parts.append(line)
+        elif t == "Div" and isinstance(c, list) and len(c) == 2 and isinstance(c[1], list):
+            attr = c[0] if isinstance(c[0], list) else None
+            classes = attr[1] if isinstance(attr, list) and len(attr) == 3 and isinstance(attr[1], list) else []
+            if "comment-card" in classes:
+                continue
+            nested = extract_comment_card_text_from_blocks(c[1])
+            if nested:
+                parts.append(nested)
+    return "\n\n".join([p for p in parts if p]).strip()
+
+
+def parse_comment_cards_from_doc(doc):
+    card_by_id = {}
+    removed = 0
+
+    def process_blocks(blocks):
+        nonlocal removed
+        kept = []
+        for block in blocks or []:
+            if not isinstance(block, dict) or block.get("t") != "Div":
+                kept.append(block)
+                continue
+            c = block.get("c")
+            if not (isinstance(c, list) and len(c) == 2):
+                kept.append(block)
+                continue
+            attr = c[0] if isinstance(c[0], list) else None
+            body_blocks = c[1] if isinstance(c[1], list) else None
+            if not (isinstance(attr, list) and len(attr) == 3 and isinstance(body_blocks, list)):
+                kept.append(block)
+                continue
+            classes = attr[1] if isinstance(attr[1], list) else []
+            identifier = str(attr[0] or "").strip()
+            kvs = attr[2] if isinstance(attr[2], list) else []
+            if "comment-card" not in classes:
+                block["c"][1] = process_blocks(body_blocks)
+                kept.append(block)
+                continue
+            meta = {}
+            for item in kvs:
+                if isinstance(item, list) and len(item) == 2 and isinstance(item[0], str):
+                    meta[item[0]] = item[1]
+            comment_id = identifier or str(meta.get("id") or "").strip()
+            if comment_id:
+                card_by_id[comment_id] = {
+                    "author": str(meta.get("author") or "").strip(),
+                    "date": str(meta.get("date") or "").strip(),
+                    "parent": str(meta.get("parent") or "").strip(),
+                    "state": parse_state_token(meta.get("state")),
+                    "paraId": str(meta.get("paraId") or "").strip(),
+                    "durableId": str(meta.get("durableId") or "").strip(),
+                    "presenceProvider": str(meta.get("presenceProvider") or "").strip(),
+                    "presenceUserId": str(meta.get("presenceUserId") or "").strip(),
+                    "anchor": str(meta.get("anchor") or "").strip(),
+                    "text": extract_comment_card_text_from_blocks(process_blocks(body_blocks)),
+                }
+            removed += 1
+        return kept
+
+    if removed or doc.get("blocks"):
+        doc["blocks"] = process_blocks(doc.get("blocks", []))
+    return card_by_id, removed
+
+
+def make_comment_span_inline(comment_id: str, edge: str, card_by_id=None):
+    if edge == "e":
+        return {"t": "Span", "c": [["", ["comment-end"], [["id", comment_id]]], []]}
+    card = (card_by_id or {}).get(comment_id) or {}
+    attrs = [["id", comment_id]]
+    for key in [
+        "author",
+        "date",
+        "parent",
+        "state",
+        "paraId",
+        "durableId",
+        "presenceProvider",
+        "presenceUserId",
+    ]:
+        value = str(card.get(key) or "").strip()
+        if value:
+            attrs.append([key, value])
+    anchor = str(card.get("anchor") or "")
+    if (
+        "\n" in anchor
+        or "\r" in anchor
+        or "---" in anchor
+        or len(anchor) > 120
+    ):
+        anchor = ""
+    nested = text_to_pandoc_inlines(anchor) if anchor else []
+    return {"t": "Span", "c": [["", ["comment-start"], attrs], nested]}
+
+
+def expand_milestone_tokens_in_text(text: str, card_by_id=None):
+    if not text:
+        return None, 0
+    matches = list(MILESTONE_TOKEN_RE.finditer(text))
+    if not matches:
+        return None, 0
+    out = []
+    cursor = 0
+    for match in matches:
+        if match.start() > cursor:
+            out.extend(text_to_pandoc_inlines(text[cursor : match.start()]))
+        comment_id = str(match.group("id1") or match.group("id2") or "").strip()
+        edge = str(match.group("edge1") or match.group("edge2") or "").strip().lower()
+        if comment_id and edge in {"s", "e"}:
+            out.append(make_comment_span_inline(comment_id, edge, card_by_id))
+            next_cursor = match.end()
+            if edge == "s":
+                card = (card_by_id or {}).get(comment_id) or {}
+                anchor = str(card.get("anchor") or "")
+                if (
+                    "\n" in anchor
+                    or "\r" in anchor
+                    or "---" in anchor
+                    or len(anchor) > 120
+                ):
+                    anchor = ""
+                if anchor and text[next_cursor:].startswith(anchor):
+                    next_cursor += len(anchor)
+        else:
+            out.extend(text_to_pandoc_inlines(match.group(0)))
+            next_cursor = match.end()
+        cursor = next_cursor
+    if cursor < len(text):
+        out.extend(text_to_pandoc_inlines(text[cursor:]))
+    return out, len(matches)
+
+
+def rewrite_milestone_tokens_in_inlines(inlines, card_by_id=None):
+    changed = 0
+    out = []
+    i = 0
+    text_nodes = {"Str", "Space", "SoftBreak", "LineBreak"}
+
+    def node_text(node):
+        t = node.get("t")
+        if t == "Str":
+            return node.get("c") or ""
+        if t == "Space":
+            return " "
+        if t in {"SoftBreak", "LineBreak"}:
+            return "\n"
+        return ""
+
+    while i < len(inlines):
+        node = inlines[i]
+        if isinstance(node, dict) and node.get("t") in text_nodes:
+            start = i
+            text_parts = []
+            while i < len(inlines):
+                probe = inlines[i]
+                if not isinstance(probe, dict) or probe.get("t") not in text_nodes:
+                    break
+                text_parts.append(node_text(probe))
+                i += 1
+            segment = "".join(text_parts)
+            replacement, replaced_count = expand_milestone_tokens_in_text(segment, card_by_id=card_by_id)
+            if replaced_count:
+                out.extend(replacement)
+                changed += replaced_count
+            else:
+                out.extend(inlines[start:i])
+            continue
+        out.append(node)
+        i += 1
+    if changed:
+        inlines[:] = out
+    return changed
+
+
+def rewrite_milestone_tokens_in_doc(doc, card_by_id=None):
+    changed = 0
+
+    def walk_inlines(inlines):
+        nonlocal changed
+        if not isinstance(inlines, list):
+            return
+        changed += rewrite_milestone_tokens_in_inlines(inlines, card_by_id=card_by_id)
+        for node in inlines:
+            if not isinstance(node, dict):
+                continue
+            t = node.get("t")
+            c = node.get("c")
+            if t == "Span" and isinstance(c, list) and len(c) == 2 and isinstance(c[1], list):
+                walk_inlines(c[1])
+                continue
+            if t in {"Emph", "Strong", "Strikeout", "Superscript", "Subscript", "SmallCaps", "Underline"}:
+                if isinstance(c, list):
+                    walk_inlines(c)
+                continue
+            if t == "Quoted" and isinstance(c, list) and len(c) >= 2 and isinstance(c[1], list):
+                walk_inlines(c[1])
+                continue
+            if t == "Cite" and isinstance(c, list) and len(c) >= 2 and isinstance(c[1], list):
+                walk_inlines(c[1])
+                continue
+            if t in {"Link", "Image"} and isinstance(c, list) and len(c) >= 2 and isinstance(c[1], list):
+                walk_inlines(c[1])
+                continue
+
+    def walk_blocks(blocks):
+        if not isinstance(blocks, list):
+            return
+        for block in blocks:
+            if not isinstance(block, dict):
+                continue
+            t = block.get("t")
+            c = block.get("c")
+            if t in {"Para", "Plain"} and isinstance(c, list):
+                walk_inlines(c)
+                continue
+            if t == "Header" and isinstance(c, list) and len(c) >= 3 and isinstance(c[2], list):
+                walk_inlines(c[2])
+                if isinstance(c[1], list) and len(c[1]) >= 1:
+                    header_id = str(c[1][0] or "").strip().lower()
+                    if "dc_comment" in header_id:
+                        c[1][0] = ""
+                continue
+            if t == "BlockQuote" and isinstance(c, list):
+                walk_blocks(c)
+                continue
+            if t == "Div" and isinstance(c, list) and len(c) == 2 and isinstance(c[1], list):
+                walk_blocks(c[1])
+                continue
+            if t in {"BulletList", "OrderedList"} and isinstance(c, list):
+                items = c if t == "BulletList" else (c[1] if len(c) > 1 else [])
+                for item in items:
+                    walk_blocks(item)
+                continue
+            if t == "DefinitionList" and isinstance(c, list):
+                for term, defs in c:
+                    walk_inlines(term)
+                    for d in defs:
+                        walk_blocks(d)
+                continue
+            if t == "Table" and isinstance(c, list):
+                for item in c:
+                    if isinstance(item, list):
+                        walk_blocks([x for x in item if isinstance(x, dict)])
+                continue
+
+    walk_blocks(doc.get("blocks", []))
+    return changed
+
+
+def build_comment_card_div(comment_id: str, meta: dict, extra_classes=None, nested_blocks=None):
+    kvs = []
+    for key in [
+        "author",
+        "date",
+        "parent",
+        "state",
+        "anchor",
+        "paraId",
+        "durableId",
+        "presenceProvider",
+        "presenceUserId",
+    ]:
+        value = str((meta or {}).get(key) or "").strip()
+        if value:
+            kvs.append([key, value])
+    text = str((meta or {}).get("text") or "").strip()
+    lines = text.splitlines() if text else [""]
+    blocks = []
+    for line in lines:
+        blocks.append({"t": "Para", "c": text_to_pandoc_inlines(line)})
+    if nested_blocks:
+        blocks.extend(nested_blocks)
+    classes = ["comment-card"]
+    for cls in extra_classes or []:
+        if cls and cls not in classes:
+            classes.append(cls)
+    return {
+        "t": "Div",
+        "c": [[str(comment_id), classes, kvs], blocks],
+    }
+
+
+def rewrite_comment_spans_to_milestones_in_doc(doc, child_ids=None):
+    child_id_set = set(str(cid) for cid in (child_ids or set()))
+    start_order = []
+    seen_starts = set()
+    anchor_by_id = {}
+    changed = 0
+
+    def comment_id_from_attr(attr):
+        if not (isinstance(attr, list) and len(attr) == 3):
+            return ""
+        identifier = str(attr[0] or "").strip()
+        if identifier:
+            return identifier
+        kvs = attr[2] if isinstance(attr[2], list) else []
+        for item in kvs:
+            if isinstance(item, list) and len(item) == 2 and item[0] == "id":
+                return str(item[1] or "").strip()
+        return ""
+
+    def walk_inlines(inlines):
+        nonlocal changed
+        if not isinstance(inlines, list):
+            return
+        out = []
+        for node in inlines:
+            if not isinstance(node, dict):
+                out.append(node)
+                continue
+            t = node.get("t")
+            c = node.get("c")
+            if t == "Span" and isinstance(c, list) and len(c) == 2 and isinstance(c[0], list):
+                attr = c[0]
+                nested = c[1] if isinstance(c[1], list) else []
+                classes = attr[1] if isinstance(attr[1], list) else []
+                cid = comment_id_from_attr(attr)
+                if cid and "comment-start" in classes:
+                    # Root anchors stay in prose as milestones; replies are carried by cards only.
+                    if cid not in child_id_set:
+                        out.append(milestone_marker_inline(cid, "s"))
+                        if cid not in seen_starts:
+                            seen_starts.add(cid)
+                            start_order.append(cid)
+                    changed += 1
+                    continue
+                if cid and "comment-end" in classes:
+                    if cid not in child_id_set:
+                        out.append(milestone_marker_inline(cid, "e"))
+                    changed += 1
+                    continue
+                walk_inlines(nested)
+                out.append({"t": "Span", "c": [attr, nested]})
+                continue
+            if t in {"Emph", "Strong", "Strikeout", "Superscript", "Subscript", "SmallCaps", "Underline"}:
+                if isinstance(c, list):
+                    walk_inlines(c)
+                out.append(node)
+                continue
+            if t == "Quoted" and isinstance(c, list) and len(c) >= 2 and isinstance(c[1], list):
+                walk_inlines(c[1])
+                out.append(node)
+                continue
+            if t == "Cite" and isinstance(c, list) and len(c) >= 2 and isinstance(c[1], list):
+                walk_inlines(c[1])
+                out.append(node)
+                continue
+            if t in {"Link", "Image"} and isinstance(c, list) and len(c) >= 2 and isinstance(c[1], list):
+                walk_inlines(c[1])
+                out.append(node)
+                continue
+            out.append(node)
+        inlines[:] = out
+
+    def walk_blocks(blocks):
+        if not isinstance(blocks, list):
+            return
+        for block in blocks:
+            if not isinstance(block, dict):
+                continue
+            t = block.get("t")
+            c = block.get("c")
+            if t in {"Para", "Plain"} and isinstance(c, list):
+                walk_inlines(c)
+                continue
+            if t == "Header" and isinstance(c, list) and len(c) >= 3 and isinstance(c[2], list):
+                walk_inlines(c[2])
+                continue
+            if t == "BlockQuote" and isinstance(c, list):
+                walk_blocks(c)
+                continue
+            if t == "Div" and isinstance(c, list) and len(c) == 2 and isinstance(c[1], list):
+                walk_blocks(c[1])
+                continue
+            if t in {"BulletList", "OrderedList"} and isinstance(c, list):
+                items = c if t == "BulletList" else (c[1] if len(c) > 1 else [])
+                for item in items:
+                    walk_blocks(item)
+                continue
+            if t == "DefinitionList" and isinstance(c, list):
+                for term, defs in c:
+                    walk_inlines(term)
+                    for d in defs:
+                        walk_blocks(d)
+                continue
+            if t == "Table" and isinstance(c, list):
+                for item in c:
+                    if isinstance(item, list):
+                        walk_blocks([x for x in item if isinstance(x, dict)])
+                continue
+
+    walk_blocks(doc.get("blocks", []))
+    return changed, start_order, anchor_by_id
+
+
+def emit_milestones_and_cards_ast(
+    md_path: Path,
+    comment_cards_by_id,
+    child_ids,
+    pandoc_extra_args=None,
+    writer_format="markdown",
+    cwd=None,
+):
+    doc = run_pandoc_json(md_path, fmt_from="markdown", extra_args=pandoc_extra_args)
+    changed, start_order, anchor_by_id = rewrite_comment_spans_to_milestones_in_doc(doc, child_ids=child_ids)
+    if start_order:
+        cards_meta_by_id = {str(cid): dict(meta or {}) for cid, meta in (comment_cards_by_id or {}).items()}
+        order_index = {cid: idx for idx, cid in enumerate(cards_meta_by_id.keys())}
+        children_by_parent = {}
+        for cid, meta in cards_meta_by_id.items():
+            parent = str((meta or {}).get("parent") or "").strip()
+            if parent and parent != cid and parent in cards_meta_by_id:
+                children_by_parent.setdefault(parent, []).append(cid)
+        for parent, children in children_by_parent.items():
+            children.sort(key=lambda x: order_index.get(x, 10**9))
+
+        def build_thread_card(comment_id, seen=None, is_reply=False):
+            if seen is None:
+                seen = set()
+            if comment_id in seen:
+                return None
+            seen.add(comment_id)
+            meta = dict(cards_meta_by_id.get(comment_id) or {})
+            if anchor_by_id.get(comment_id):
+                meta.setdefault("anchor", anchor_by_id.get(comment_id))
+            nested = []
+            for child_id in children_by_parent.get(comment_id, []):
+                child_div = build_thread_card(child_id, seen=seen, is_reply=True)
+                if child_div is not None:
+                    nested.append(child_div)
+            extra_classes = ["comment-reply-card"] if is_reply else []
+            return build_comment_card_div(comment_id, meta, extra_classes=extra_classes, nested_blocks=nested)
+
+        cards_by_root_id = {}
+        for root_id in start_order:
+            cards_by_root_id[root_id] = build_thread_card(root_id, seen=set(), is_reply=False)
+
+        marker_order = []
+
+        def push_marker_ids_from_text(text, start_ids, end_ids):
+            for match in MILESTONE_TOKEN_RE.finditer(text or ""):
+                mid = (match.group("id1") or match.group("id2") or "").strip()
+                edge = (match.group("edge1") or match.group("edge2") or "").lower()
+                if not mid or edge not in {"s", "e"}:
+                    continue
+                if edge == "s":
+                    if mid not in start_ids:
+                        start_ids.append(mid)
+                    if mid not in marker_order:
+                        marker_order.append(mid)
+                else:
+                    if mid not in end_ids:
+                        end_ids.append(mid)
+
+        def scan_inlines_for_markers(inlines, start_ids, end_ids):
+            if not isinstance(inlines, list):
+                return
+            for node in inlines:
+                if not isinstance(node, dict):
+                    continue
+                t = node.get("t")
+                c = node.get("c")
+                if t == "Str":
+                    push_marker_ids_from_text(str(c or ""), start_ids, end_ids)
+                    continue
+                if t in {
+                    "Emph",
+                    "Strong",
+                    "Strikeout",
+                    "Superscript",
+                    "Subscript",
+                    "SmallCaps",
+                    "Underline",
+                } and isinstance(c, list):
+                    scan_inlines_for_markers(c, start_ids, end_ids)
+                    continue
+                if t == "Span" and isinstance(c, list) and len(c) == 2 and isinstance(c[1], list):
+                    scan_inlines_for_markers(c[1], start_ids, end_ids)
+                    continue
+                if t == "Quoted" and isinstance(c, list) and len(c) >= 2 and isinstance(c[1], list):
+                    scan_inlines_for_markers(c[1], start_ids, end_ids)
+                    continue
+                if t == "Cite" and isinstance(c, list) and len(c) >= 2 and isinstance(c[1], list):
+                    scan_inlines_for_markers(c[1], start_ids, end_ids)
+                    continue
+                if t in {"Link", "Image"} and isinstance(c, list) and len(c) >= 2 and isinstance(c[1], list):
+                    scan_inlines_for_markers(c[1], start_ids, end_ids)
+                    continue
+
+        def collect_block_markers(block, start_ids, end_ids):
+            if not isinstance(block, dict):
+                return
+            t = block.get("t")
+            c = block.get("c")
+            if t in {"Para", "Plain"} and isinstance(c, list):
+                scan_inlines_for_markers(c, start_ids, end_ids)
+            elif t == "Header" and isinstance(c, list) and len(c) >= 3 and isinstance(c[2], list):
+                scan_inlines_for_markers(c[2], start_ids, end_ids)
+
+        def block_markers_in_subtree(block):
+            starts = []
+            ends = []
+
+            def walk_block(node):
+                if not isinstance(node, dict):
+                    return
+                collect_block_markers(node, starts, ends)
+                t = node.get("t")
+                c = node.get("c")
+                if t == "BlockQuote" and isinstance(c, list):
+                    for child in c:
+                        walk_block(child)
+                    return
+                if t == "Div" and isinstance(c, list) and len(c) == 2 and isinstance(c[1], list):
+                    for child in c[1]:
+                        walk_block(child)
+                    return
+                if t == "BulletList" and isinstance(c, list):
+                    for item in c:
+                        if isinstance(item, list):
+                            for child in item:
+                                walk_block(child)
+                    return
+                if t == "OrderedList" and isinstance(c, list) and len(c) >= 2 and isinstance(c[1], list):
+                    for item in c[1]:
+                        if isinstance(item, list):
+                            for child in item:
+                                walk_block(child)
+                    return
+                if t == "DefinitionList" and isinstance(c, list):
+                    for term, defs in c:
+                        scan_inlines_for_markers(term, starts, ends)
+                        for d in defs:
+                            if isinstance(d, list):
+                                for child in d:
+                                    walk_block(child)
+                    return
+                if t == "Table" and isinstance(c, list):
+                    for item in c:
+                        if isinstance(item, list):
+                            for maybe_block in item:
+                                if isinstance(maybe_block, dict):
+                                    walk_block(maybe_block)
+
+            walk_block(block)
+            return starts, ends
+
+        top_blocks = doc.get("blocks", [])
+        first_start_index = {}
+        last_end_index = {}
+        root_set = set(start_order)
+        for idx, block in enumerate(top_blocks):
+            starts, ends = block_markers_in_subtree(block)
+            for cid in starts:
+                if cid in root_set and cid not in first_start_index:
+                    first_start_index[cid] = idx
+            for cid in ends:
+                if cid in root_set:
+                    last_end_index[cid] = idx
+
+        cards_after_index = {}
+        pending_append = []
+        for cid in start_order:
+            card = cards_by_root_id.get(cid)
+            if card is None:
+                continue
+            insert_after = last_end_index.get(cid, first_start_index.get(cid))
+            if insert_after is None:
+                pending_append.append(card)
+                continue
+            cards_after_index.setdefault(insert_after, []).append(card)
+
+        out_blocks = []
+        for idx, block in enumerate(top_blocks):
+            out_blocks.append(block)
+            out_blocks.extend(cards_after_index.get(idx, []))
+        out_blocks.extend(pending_append)
+        doc["blocks"] = out_blocks
+    if changed or start_order:
+        render_pandoc_json_to_markdown(
+            doc,
+            md_path,
+            writer_format=writer_format,
+            extra_args=pandoc_extra_args,
+            cwd=cwd,
+        )
+    return changed, len(start_order)
+
+
+def normalize_milestone_tokens_ast(
+    md_path: Path,
+    out_md_path: Path,
+    pandoc_extra_args=None,
+    writer_format="markdown",
+    cwd=None,
+):
+    doc = run_pandoc_json(md_path, fmt_from="markdown", extra_args=pandoc_extra_args)
+    card_by_id, removed_cards = parse_comment_cards_from_doc(doc)
+    changed = rewrite_milestone_tokens_in_doc(doc, card_by_id=card_by_id)
+    if changed or removed_cards or md_path != out_md_path:
+        render_pandoc_json_to_markdown(
+            doc,
+            out_md_path,
+            writer_format=writer_format,
+            extra_args=pandoc_extra_args,
+            cwd=cwd,
+        )
+    return changed, card_by_id
 
 
 def render_pandoc_json_to_markdown(
@@ -740,7 +1397,7 @@ def inlines_to_text(inlines):
     return normalize_markdown_comment_text(text)
 
 
-def extract_comment_texts_from_markdown(md_path: Path, pandoc_extra_args):
+def extract_comment_texts_from_markdown(md_path: Path, pandoc_extra_args, card_by_id=None):
     doc = run_pandoc_json(md_path, fmt_from="markdown", extra_args=pandoc_extra_args)
     own_text_by_id = {}
     children_by_id = {}
@@ -838,8 +1495,9 @@ def extract_comment_texts_from_markdown(md_path: Path, pandoc_extra_args):
                 parsed = parse_span_meta(attr)
                 if parsed is not None:
                     identifier, classes, meta = parsed
-                    if identifier and "comment-start" in classes:
-                        on_comment_start(identifier, inlines_to_text(nested_inlines), meta)
+                    comment_id = (identifier or meta.get("id") or "").strip()
+                    if comment_id and "comment-start" in classes:
+                        on_comment_start(comment_id, inlines_to_text(nested_inlines), meta)
                         continue
                 walk_inlines(nested_inlines)
                 continue
@@ -915,24 +1573,6 @@ def extract_comment_texts_from_markdown(md_path: Path, pandoc_extra_args):
                 continue
 
     walk_blocks(doc.get("blocks", []))
-    valid_parent_by_id = {}
-    for child_id in seen_order:
-        if child_id not in started_ids:
-            continue
-        parent_id = (parent_by_id.get(child_id) or "").strip()
-        # Safety: only treat as threaded when both child and parent were seen
-        # as real comment-start spans in markdown.
-        if (
-            not parent_id
-            or parent_id == child_id
-            or parent_id not in started_ids
-        ):
-            continue
-        valid_parent_by_id[child_id] = parent_id
-        add_child(parent_id, child_id)
-
-    flattened_by_id = {}
-
     def reply_header(comment_id: str):
         meta = meta_by_id.get(comment_id, {})
         author = (meta.get("author") or "Unknown").strip() or "Unknown"
@@ -956,10 +1596,55 @@ def extract_comment_texts_from_markdown(md_path: Path, pandoc_extra_args):
                 parts.append(f"{reply_header(child_id)}\n{child_flat}")
         return "\n\n".join(parts).strip()
 
+    if card_by_id:
+        for cid, card in card_by_id.items():
+            ensure_comment_id(cid)
+            started_ids.add(cid)
+            card_text = normalize_markdown_comment_text(card.get("text") or "")
+            if card_text:
+                own_text_by_id[cid] = card_text
+            author = (card.get("author") or "").strip()
+            date = (card.get("date") or "").strip()
+            parent_id = (card.get("parent") or "").strip()
+            if author and not meta_by_id[cid].get("author"):
+                meta_by_id[cid]["author"] = author
+            if date and not meta_by_id[cid].get("date"):
+                meta_by_id[cid]["date"] = date
+            if parent_id:
+                parent_by_id[cid] = parent_id
+            state_by_id[cid] = parse_state_token(card.get("state"))
+            para_id = (card.get("paraId") or "").strip()
+            durable_id = (card.get("durableId") or "").strip()
+            if para_id:
+                para_by_id[cid] = para_id
+            if durable_id:
+                durable_by_id[cid] = durable_id
+            provider = (card.get("presenceProvider") or "").strip()
+            user = (card.get("presenceUserId") or "").strip()
+            if provider or user:
+                meta_by_id[cid]["presenceProvider"] = provider
+                meta_by_id[cid]["presenceUserId"] = user
+
     ordered_started_ids = [cid for cid in seen_order if cid in started_ids]
     if not ordered_started_ids:
         ordered_started_ids = list(seen_order)
 
+    valid_parent_by_id = {}
+    started_id_set = set(ordered_started_ids)
+    for child_id in ordered_started_ids:
+        parent_id = (parent_by_id.get(child_id) or "").strip()
+        # Accept threading when IDs are present in extracted comment set,
+        # including card-only reply comments that have no inline markers.
+        if (
+            not parent_id
+            or parent_id == child_id
+            or parent_id not in started_id_set
+        ):
+            continue
+        valid_parent_by_id[child_id] = parent_id
+        add_child(parent_id, child_id)
+
+    flattened_by_id = {}
     for cid in ordered_started_ids:
         flattened_by_id[cid] = flatten_comment(cid, set())
 
@@ -1864,6 +2549,28 @@ def convert_docx_to_md(in_docx: Path, out_md: Path, pandoc_extra_args):
         text, _ = normalize_nested_comment_end_markers(text)
         cleaned, _ = strip_placeholder_shape_images(text)
         out_md.write_text(cleaned, encoding="utf-8")
+        comment_cards_by_id = {}
+        for cid, meta in comments.items():
+            comment_cards_by_id[cid] = {
+                "author": (meta.get("author") or "").strip(),
+                "date": (meta.get("date") or "").strip(),
+                "parent": (parent_map.get(cid) or "").strip(),
+                "state": "resolved" if meta.get("resolved") else "active",
+                "paraId": (meta.get("para_id") or "").strip(),
+                "durableId": (meta.get("durable_id") or "").strip(),
+                "presenceProvider": (presence_provider_by_id.get(cid) or "").strip(),
+                "presenceUserId": (presence_user_by_id.get(cid) or "").strip(),
+                "text": normalize_markdown_comment_text(meta.get("text") or ""),
+            }
+        emit_milestones_and_cards_ast(
+            out_md,
+            comment_cards_by_id,
+            set(parent_map.keys()),
+            pandoc_extra_args=pandoc_extra_args,
+            writer_format=md_writer,
+            cwd=out_md.parent,
+        )
+        cleaned = out_md.read_text(encoding="utf-8")
         prune_unreferenced_new_media(media_dir, media_before, cleaned)
 
 
@@ -1871,16 +2578,32 @@ def convert_md_to_docx(in_md: Path, out_docx: Path, pandoc_extra_args):
     with tempfile.TemporaryDirectory(prefix=".docx-comments-mdinput-", dir=temp_dir_root_for(in_md)) as tmp:
         tmp_dir = Path(tmp)
         sanitized_md = tmp_dir / "input.md"
+        normalized_md = tmp_dir / "normalized.md"
         pandoc_input_md = tmp_dir / "pandoc-input.md"
         text = in_md.read_text(encoding="utf-8")
         text, _ = repair_unbalanced_comment_markers(text)
         text, _ = normalize_nested_comment_end_markers(text)
         cleaned, _ = strip_placeholder_shape_images(text)
         sanitized_md.write_text(cleaned, encoding="utf-8")
-
-        comment_data = extract_comment_texts_from_markdown(sanitized_md, pandoc_extra_args)
-        strip_comment_transport_attrs_ast(
+        _, card_by_id = normalize_milestone_tokens_ast(
             sanitized_md,
+            normalized_md,
+            pandoc_extra_args=pandoc_extra_args,
+            writer_format="markdown",
+            cwd=in_md.parent,
+        )
+        normalized_text = normalized_md.read_text(encoding="utf-8")
+        normalized_text, _ = repair_unbalanced_comment_markers(normalized_text)
+        normalized_text, _ = normalize_nested_comment_end_markers(normalized_text)
+        normalized_md.write_text(normalized_text, encoding="utf-8")
+
+        comment_data = extract_comment_texts_from_markdown(
+            normalized_md,
+            pandoc_extra_args,
+            card_by_id=card_by_id,
+        )
+        strip_comment_transport_attrs_ast(
+            normalized_md,
             pandoc_input_md,
             pandoc_extra_args=pandoc_extra_args,
             writer_format="markdown",

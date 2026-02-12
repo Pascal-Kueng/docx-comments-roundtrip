@@ -12,6 +12,10 @@ INLINE_IMAGE_RE = re.compile(
     r'!\[(?P<alt>[^\]]*)\]\((?P<src>[^)\s]+)(?:\s+"(?P<title>[^"]*)")?\)\{(?P<attrs>[^}]*)\}',
     re.DOTALL,
 )
+MILESTONE_TOKEN_RE = re.compile(
+    r"(?:DC_COMMENT\(\s*(?:dc\s*:\s*)?(?P<id1>[A-Za-z0-9][A-Za-z0-9_-]*)\s*\.\s*(?P<edge1>[sSeE])\s*\))"
+    r"|(?:\{\[\s*(?:dc\s*:\s*)?(?P<id2>[A-Za-z0-9][A-Za-z0-9_-]*)\s*\.\s*(?P<edge2>[sSeE])\s*\]\})"
+)
 
 
 @dataclass(frozen=True)
@@ -165,7 +169,34 @@ def inspect_markdown_comments(markdown_path: Path) -> MarkdownCommentSnapshot:
     metadata_by_id: dict[str, dict[str, str]] = {}
     parent_candidate_by_id: dict[str, str] = {}
     state_by_id: dict[str, str] = {}
+    card_by_id: dict[str, dict[str, str]] = {}
     start_order = 0
+
+    def extract_comment_card_text(blocks) -> str:
+        parts = []
+        for block in blocks or []:
+            if not isinstance(block, dict):
+                continue
+            t = block.get("t")
+            c = block.get("c")
+            if t in {"Para", "Plain"} and isinstance(c, list):
+                text = inlines_to_text(c)
+                if text:
+                    parts.append(text)
+            elif t == "Header" and isinstance(c, list) and len(c) >= 3 and isinstance(c[2], list):
+                text = inlines_to_text(c[2])
+                if text:
+                    parts.append(text)
+            elif t == "Div" and isinstance(c, list) and len(c) == 2 and isinstance(c[1], list):
+                attr = c[0] if isinstance(c[0], list) else None
+                classes = attr[1] if isinstance(attr, list) and len(attr) == 3 and isinstance(attr[1], list) else []
+                if "comment-card" in classes:
+                    # Nested reply cards belong to separate comments.
+                    continue
+                nested = extract_comment_card_text(c[1])
+                if nested:
+                    parts.append(nested)
+        return "\n\n".join(parts).strip()
 
     def ensure_id(comment_id: str) -> None:
         own_text_by_id.setdefault(comment_id, "")
@@ -187,29 +218,29 @@ def inspect_markdown_comments(markdown_path: Path) -> MarkdownCommentSnapshot:
 
     def on_start(identifier: str, meta: dict, nested_inlines: list) -> None:
         nonlocal start_order
-        comment_id = identifier or (meta.get("id") or "")
-        comment_id = comment_id.strip()
+        comment_id = (identifier or meta.get("id") or "").strip()
         if not comment_id:
             return
         ensure_id(comment_id)
-        text = inlines_to_text(nested_inlines)
+        card_meta = card_by_id.get(comment_id) or {}
+        text = inlines_to_text(nested_inlines) or normalize_comment_text(card_meta.get("text") or "")
         existing = own_text_by_id.get(comment_id, "").strip()
         if text:
             if not existing:
                 own_text_by_id[comment_id] = text
             elif text != existing and text not in existing:
                 own_text_by_id[comment_id] = f"{existing}\n\n{text}"
-        author = (meta.get("author") or "").strip()
-        date = (meta.get("date") or "").strip()
-        parent = (meta.get("parent") or "").strip()
-        state = normalize_state_token(meta.get("state") or "")
+        author = (meta.get("author") or card_meta.get("author") or "").strip()
+        date = (meta.get("date") or card_meta.get("date") or "").strip()
+        parent = (meta.get("parent") or card_meta.get("parent") or "").strip()
+        state = normalize_state_token(meta.get("state") or card_meta.get("state") or "")
         if author and not metadata_by_id[comment_id].get("author"):
             metadata_by_id[comment_id]["author"] = author
         if date and not metadata_by_id[comment_id].get("date"):
             metadata_by_id[comment_id]["date"] = date
         if parent:
             parent_candidate_by_id[comment_id] = parent
-        if "state" in meta:
+        if "state" in meta or card_meta.get("state"):
             state_by_id[comment_id] = state
         starts.append(
             MarkdownCommentStart(
@@ -230,11 +261,42 @@ def inspect_markdown_comments(markdown_path: Path) -> MarkdownCommentSnapshot:
             end_ids_order.append(comment_id)
 
     def walk_inlines(inlines) -> None:
-        for node in inlines or []:
+        text_nodes = {"Str", "Space", "SoftBreak", "LineBreak"}
+        i = 0
+        while i < len(inlines or []):
+            node = inlines[i]
             if not isinstance(node, dict):
+                i += 1
                 continue
             t = node.get("t")
             c = node.get("c")
+            if t in text_nodes:
+                j = i
+                parts = []
+                while j < len(inlines or []):
+                    probe = inlines[j]
+                    if not isinstance(probe, dict):
+                        break
+                    pt = probe.get("t")
+                    if pt == "Str":
+                        parts.append(probe.get("c") or "")
+                    elif pt == "Space":
+                        parts.append(" ")
+                    elif pt in {"SoftBreak", "LineBreak"}:
+                        parts.append("\n")
+                    else:
+                        break
+                    j += 1
+                chunk = "".join(parts)
+                for match in MILESTONE_TOKEN_RE.finditer(chunk):
+                    cid = (match.group("id1") or match.group("id2") or "").strip()
+                    edge = (match.group("edge1") or match.group("edge2") or "").strip().lower()
+                    if edge == "s":
+                        on_start(cid, {}, [])
+                    elif edge == "e":
+                        on_end(cid, {"id": cid})
+                i = j
+                continue
             if t == "Span" and isinstance(c, list) and len(c) == 2:
                 parsed = parse_attr(c[0])
                 nested = c[1] if isinstance(c[1], list) else []
@@ -242,17 +304,22 @@ def inspect_markdown_comments(markdown_path: Path) -> MarkdownCommentSnapshot:
                     identifier, classes, meta = parsed
                     if "comment-start" in classes:
                         on_start(identifier, meta, nested)
+                        i += 1
                         continue
                     if "comment-end" in classes:
                         on_end(identifier, meta)
+                        i += 1
                         continue
                 walk_inlines(nested)
+                i += 1
                 continue
             if t == "Header" and isinstance(c, list) and len(c) >= 3 and isinstance(c[2], list):
                 walk_inlines(c[2])
+                i += 1
                 continue
             if t in {"Link", "Image"} and isinstance(c, list) and len(c) >= 2 and isinstance(c[1], list):
                 walk_inlines(c[1])
+                i += 1
                 continue
             if isinstance(c, list):
                 for item in c:
@@ -260,6 +327,7 @@ def inspect_markdown_comments(markdown_path: Path) -> MarkdownCommentSnapshot:
                         walk_inlines([item])
                     elif isinstance(item, list):
                         walk_inlines(item)
+            i += 1
 
     def walk_blocks(blocks) -> None:
         for block in blocks or []:
@@ -277,6 +345,24 @@ def inspect_markdown_comments(markdown_path: Path) -> MarkdownCommentSnapshot:
                 walk_blocks(c)
                 continue
             if t == "Div" and isinstance(c, list) and len(c) == 2 and isinstance(c[1], list):
+                attr = c[0] if isinstance(c[0], list) else None
+                if isinstance(attr, list) and len(attr) == 3:
+                    classes = attr[1] if isinstance(attr[1], list) else []
+                    if "comment-card" in classes:
+                        comment_id = str(attr[0] or "").strip()
+                        kvs = attr[2] if isinstance(attr[2], list) else []
+                        meta = {}
+                        for item in kvs:
+                            if isinstance(item, list) and len(item) == 2 and isinstance(item[0], str):
+                                meta[item[0]] = item[1]
+                        if comment_id:
+                            card_by_id[comment_id] = {
+                                "author": str(meta.get("author") or "").strip(),
+                                "date": str(meta.get("date") or "").strip(),
+                                "parent": str(meta.get("parent") or "").strip(),
+                                "state": normalize_state_token(meta.get("state") or ""),
+                                "text": extract_comment_card_text(c[1]),
+                            }
                 walk_blocks(c[1])
                 continue
             if t in {"BulletList", "OrderedList"} and isinstance(c, list):
@@ -291,7 +377,78 @@ def inspect_markdown_comments(markdown_path: Path) -> MarkdownCommentSnapshot:
                     elif isinstance(item, list):
                         walk_blocks([x for x in item if isinstance(x, dict)])
 
+    def collect_cards(blocks) -> None:
+        for block in blocks or []:
+            if not isinstance(block, dict):
+                continue
+            if block.get("t") != "Div":
+                c = block.get("c")
+                if isinstance(c, list):
+                    for item in c:
+                        if isinstance(item, list):
+                            collect_cards([x for x in item if isinstance(x, dict)])
+                        elif isinstance(item, dict):
+                            collect_cards([item])
+                continue
+            c = block.get("c")
+            if not (isinstance(c, list) and len(c) == 2 and isinstance(c[1], list)):
+                continue
+            attr = c[0] if isinstance(c[0], list) else None
+            if not (isinstance(attr, list) and len(attr) == 3):
+                continue
+            classes = attr[1] if isinstance(attr[1], list) else []
+            if "comment-card" not in classes:
+                collect_cards(c[1])
+                continue
+            comment_id = str(attr[0] or "").strip()
+            kvs = attr[2] if isinstance(attr[2], list) else []
+            meta = {}
+            for item in kvs:
+                if isinstance(item, list) and len(item) == 2 and isinstance(item[0], str):
+                    meta[item[0]] = item[1]
+            if comment_id:
+                card_by_id[comment_id] = {
+                    "author": str(meta.get("author") or "").strip(),
+                    "date": str(meta.get("date") or "").strip(),
+                    "parent": str(meta.get("parent") or "").strip(),
+                    "state": normalize_state_token(meta.get("state") or ""),
+                    "text": extract_comment_card_text(c[1]),
+                }
+                collect_cards(c[1])
+
+    collect_cards(doc.get("blocks", []))
     walk_blocks(doc.get("blocks", []))
+
+    # Card-only comments (typically threaded replies) may not have milestone markers in prose.
+    for comment_id, card_meta in card_by_id.items():
+        if any(s.id == comment_id for s in starts):
+            continue
+        ensure_id(comment_id)
+        text = normalize_comment_text(card_meta.get("text") or "")
+        if text and not own_text_by_id.get(comment_id):
+            own_text_by_id[comment_id] = text
+        parent = (card_meta.get("parent") or "").strip()
+        author = (card_meta.get("author") or "").strip()
+        date = (card_meta.get("date") or "").strip()
+        if author:
+            metadata_by_id[comment_id]["author"] = author
+        if date:
+            metadata_by_id[comment_id]["date"] = date
+        if parent:
+            parent_candidate_by_id[comment_id] = parent
+        state_by_id[comment_id] = normalize_state_token(card_meta.get("state") or "active")
+        starts.append(
+            MarkdownCommentStart(
+                id=comment_id,
+                order=start_order,
+                text=text,
+                author=author,
+                date=date,
+                parent=parent,
+                state=state_by_id[comment_id],
+            )
+        )
+        start_order += 1
 
     start_ids_order = [span.id for span in starts]
     started_ids = set(start_ids_order)
