@@ -1,16 +1,16 @@
 # Publishing Checklist
 
-This is a practical checklist to run tests and publish `docx-md-comments`.
+This is the practical checklist to test and publish `docx-md-comments`.
+
+Primary path: Trusted Publishing via GitHub Actions (`.github/workflows/publish.yml`).
 
 ## 0) Finalize repository state
 
-Before building artifacts:
+Before publishing:
 
-- Commit packaging and CLI changes.
-- Confirm the package name in `pyproject.toml` is what you want on PyPI.
-- Ensure licensing is consistent:
-  - `pyproject.toml` declares `Apache-2.0`
-  - repository contains a matching `LICENSE` file
+- Commit packaging/CLI changes.
+- Confirm `[project].name` in `pyproject.toml` is correct for PyPI.
+- Ensure licensing is consistent (`LICENSE` present and referenced by `pyproject.toml`).
 
 ## 1) Pre-release checks
 
@@ -21,7 +21,7 @@ make test
 python -m unittest -q tests.test_cli_entrypoints
 ```
 
-Optional manual smoke artifact:
+Optional local artifact smoke:
 
 ```bash
 make roundtrip-example
@@ -32,63 +32,55 @@ Inspect:
 - `artifacts/out_test.md`
 - `artifacts/out_test.docx`
 
-## 2) Clean build environment
+## 2) One-time Trusted Publishing setup
 
-Create and activate a clean virtualenv (this keeps your system clean):
+Configure trusted publishers in PyPI and TestPyPI.
 
-```bash
-python -m venv .venv-release
-source .venv-release/bin/activate
-```
+PyPI publisher settings:
 
-Install build tooling:
+- Owner: `Pascal-Kueng`
+- Repository name: `docx-md-comments`
+- Workflow name: `publish.yml`
+- Environment name: `pypi`
 
-```bash
-python -m pip install --upgrade pip build twine
-```
+TestPyPI publisher settings:
 
-## 3) Build package artifacts
+- Owner: `Pascal-Kueng`
+- Repository name: `docx-md-comments`
+- Workflow name: `publish.yml`
+- Environment name: `testpypi`
 
-```bash
-rm -rf dist build *.egg-info
-python -m build
-python -m twine check dist/*
-```
+Repository side:
 
-Expected outputs:
+- Keep `.github/workflows/publish.yml` in default branch.
+- Create GitHub environments `pypi` and `testpypi` (add approval rules if desired).
 
-- `dist/docx_md_comments-<VERSION>-py3-none-any.whl`
-- `dist/docx_md_comments-<VERSION>.tar.gz`
+No PyPI API token or `twine upload` credentials are needed for this path.
 
-## 4) Local install smoke test
+## 3) Publish via GitHub Actions
 
-Install from wheel within the build env to verify structure:
+TestPyPI dry run (recommended before production):
 
-```bash
-python -m pip install --force-reinstall dist/*.whl
-```
+1. Open Actions -> `Publish`.
+2. Click `Run workflow`.
+3. Select `target=testpypi`.
+4. Wait for `Publish to TestPyPI` to pass.
 
-Verify CLI entry points:
+Production publish:
 
-```bash
-dmc --help
-docx-comments --help
-docx2md --help
-md2docx --help
-d2m --help
-m2d --help
-```
-
-## 5) Publish to TestPyPI first (recommended)
-
-Upload using the pre-configured `~/.pypirc` tokens:
+1. Create and push a release tag:
 
 ```bash
-python -m twine upload --repository testpypi dist/*
+git tag v<VERSION>
+git push origin v<VERSION>
 ```
 
-**Verification Step:**
-Open a NEW terminal window (don't use the build env) to simulate a fresh user:
+2. Create a GitHub Release for that tag and click `Publish release`.
+3. The `Publish` workflow runs automatically and executes `Publish to PyPI`.
+
+## 4) Verification
+
+Verify install from TestPyPI (after dry run):
 
 ```bash
 cd /tmp
@@ -96,58 +88,30 @@ python -m venv test-pypi-env
 source test-pypi-env/bin/activate
 python -m pip install --index-url https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple docx-md-comments
 dmc --help
-```
-
-**Cleanup**
-
-```bash
 deactivate
 rm -rf test-pypi-env
 ```
 
-## 6) Publish to PyPI
-
-Back in your build terminal (`.venv-release`), upload to the live registry:
-
-```bash
-python -m twine upload dist/*
-```
-
-Alternative:
-
-- Use Trusted Publishing via GitHub Actions (recommended) instead of manual `twine` upload.
-
-## 7) Tag and release
-
-```bash
-git tag v<VERSION>
-git push origin v<VERSION>
-```
-
-Create a GitHub release and include:
-
-- install command: `pipx install docx-md-comments`
-- upgrade command: `pipx upgrade docx-md-comments`
-- key changes and any migration notes.
-
-## 8) Post-release cleanup
-
-Remove the build environment and artifacts:
-
-```bash
-deactivate
-rm -rf .venv-release dist build *.egg-info
-```
-
-## 9) Final user verification
-
-In your normal terminal (or using pipx):
+Verify install from PyPI:
 
 ```bash
 pipx install docx-md-comments
 dmc --help
 ```
 
-Recommended additional verification:
+## 5) Emergency fallback: manual upload
 
-- Run install/CLI checks on macOS, Linux, and Windows.
+If GitHub OIDC publishing is unavailable, use manual `twine` upload:
+
+```bash
+python -m venv .venv-release
+source .venv-release/bin/activate
+python -m pip install --upgrade pip build twine
+rm -rf dist build *.egg-info
+python -m build
+python -m twine check --strict dist/*
+python -m twine upload --repository testpypi dist/*
+python -m twine upload dist/*
+deactivate
+rm -rf .venv-release dist build *.egg-info
+```

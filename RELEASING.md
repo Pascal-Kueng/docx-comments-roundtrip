@@ -44,9 +44,9 @@ git push origin vX.Y.Z
 
 Follow `PUBLISHING.md` sections:
 
-1. Build/check artifacts
-2. TestPyPI publish + install smoke test
-3. PyPI publish
+1. Ensure Trusted Publishing is configured (`pypi`/`testpypi` environments).
+2. Run Actions -> `Publish` with `target=testpypi`.
+3. Publish GitHub Release for `vX.Y.Z` tag to trigger PyPI publish.
 
 ## 6) GitHub release notes
 
