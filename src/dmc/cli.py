@@ -12,24 +12,41 @@ from .version import __version__
 # Keep parity with previous script behavior in stow/symlink environments.
 sys.dont_write_bytecode = True
 
-DMC_HELP = f"""dmc {__version__} - Docx Markdown Comments
 
-Lossless bidirectional conversion preserving comment threads.
+def _help_formatter(prog: str):
+    # Keep option/help columns stable and avoid cramped wrapping.
+    return argparse.HelpFormatter(prog, max_help_position=30, width=100)
 
-USAGE:
-    dmc <FILE>                      Auto-detect and convert
-    dmc <COMMAND> [OPTIONS]         Explicit conversion
 
-COMMANDS:
-    docx2md (d2m)   Convert DOCX -> Markdown
-    md2docx (m2d)   Convert Markdown -> DOCX
+class _DmcHelpFormatter(argparse.RawDescriptionHelpFormatter):
+    def __init__(self, prog):
+        super().__init__(prog, max_help_position=30, width=100)
 
-AUTO-DETECT:
-    dmc draft.docx                  Creates draft.md
-    dmc draft.md                    Creates draft.docx
 
-Use 'dmc <command> --help' for more information.
-"""
+def _build_dmc_help_parser():
+    parser = argparse.ArgumentParser(
+        prog="dmc",
+        description=f"dmc {__version__} - Docx Markdown Comments\n\n"
+        "Lossless bidirectional conversion preserving comment threads.",
+        usage="dmc <FILE>\n       dmc <COMMAND> [OPTIONS]",
+        epilog=(
+            "COMMANDS:\n"
+            "  docx2md (d2m)   Convert DOCX -> Markdown\n"
+            "  md2docx (m2d)   Convert Markdown -> DOCX\n\n"
+            "AUTO-DETECT:\n"
+            "  dmc draft.docx  Creates draft.md\n"
+            "  dmc draft.md    Creates draft.docx\n\n"
+            "Use 'dmc <command> --help' for more information."
+        ),
+        formatter_class=_DmcHelpFormatter,
+    )
+    parser.add_argument(
+        "target",
+        nargs="?",
+        metavar="FILE|COMMAND",
+        help="Input file for auto mode, or a command name such as docx2md / md2docx",
+    )
+    return parser
 
 
 def _handle_common_errors(fn):
@@ -47,6 +64,7 @@ def _build_docx2md_parser(prog_name: str):
     parser = argparse.ArgumentParser(
         prog=prog_name,
         description="docx2md (d2m) - Convert DOCX to Markdown",
+        formatter_class=_help_formatter,
     )
     parser.add_argument("input", type=Path, help="Input DOCX path")
     parser.add_argument("-o", "--output", type=Path, help="Output markdown file")
@@ -57,6 +75,7 @@ def _build_md2docx_parser(prog_name: str):
     parser = argparse.ArgumentParser(
         prog=prog_name,
         description="md2docx (m2d) - Convert Markdown to DOCX",
+        formatter_class=_help_formatter,
     )
     parser.add_argument("input", type=Path, help="Input markdown path")
     parser.add_argument("-o", "--output", type=Path, help="Output DOCX file")
@@ -98,7 +117,7 @@ def main_md2docx(argv=None, prog_name=None):
 def _main_dmc(argv=None):
     args_list = list(sys.argv[1:] if argv is None else argv)
     if not args_list or args_list[0] in {"-h", "--help"}:
-        print(DMC_HELP)
+        _build_dmc_help_parser().print_help()
         return 0
 
     if args_list[0] in {"-V", "--version"}:
@@ -122,6 +141,7 @@ def _main_dmc(argv=None):
     auto_parser = argparse.ArgumentParser(
         prog="dmc",
         description="Auto-detect conversion mode from input extension.",
+        formatter_class=_help_formatter,
     )
     auto_parser.add_argument("input", type=Path, help="Input file (.docx or markdown)")
     auto_parser.add_argument("-o", "--output", type=Path, help="Output file path")
