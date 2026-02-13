@@ -59,10 +59,10 @@ Include:
 
 ## 7) Post-release verification
 
-In a clean environment:
+In a clean environment (or using pipx):
 
 ```bash
-python -m pip install --upgrade docx-md-comments
+pipx install docx-md-comments
 dmc --help
 ```
 

@@ -128,7 +128,7 @@ make test-roundtrip
 
 Please open bugs/feature requests at:
 
-https://github.com/pascalkueng/docx-comments-roundtrip/issues
+https://github.com/Pascal-Kueng/docx-md-comments/issues
 
 When reporting a conversion bug, include:
 

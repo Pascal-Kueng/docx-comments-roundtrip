@@ -24,7 +24,7 @@ Inspect:
 
 ## 2) Clean build environment
 
-Create and activate a clean virtualenv:
+Create and activate a clean virtualenv (this keeps your system clean):
 
 ```bash
 python -m venv .venv-release
@@ -47,12 +47,12 @@ python -m twine check dist/*
 
 Expected outputs:
 
-- `dist/docx_comments_roundtrip-<VERSION>-py3-none-any.whl`
-- `dist/docx_comments_roundtrip-<VERSION>.tar.gz`
+- `dist/docx_md_comments-<VERSION>-py3-none-any.whl`
+- `dist/docx_md_comments-<VERSION>.tar.gz`
 
 ## 4) Local install smoke test
 
-Install from wheel:
+Install from wheel within the build env to verify structure:
 
 ```bash
 python -m pip install --force-reinstall dist/*.whl
@@ -71,22 +71,33 @@ m2d --help
 
 ## 5) Publish to TestPyPI first (recommended)
 
-Create a TestPyPI API token and configure `~/.pypirc`, or use env vars.
-
-Upload:
+Upload using the pre-configured `~/.pypirc` tokens:
 
 ```bash
 python -m twine upload --repository testpypi dist/*
 ```
 
-Install from TestPyPI in a fresh env:
+**Verification Step:**
+Open a NEW terminal window (don't use the build env) to simulate a fresh user:
 
 ```bash
+cd /tmp
+python -m venv test-pypi-env
+source test-pypi-env/bin/activate
 python -m pip install --index-url https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple docx-md-comments
 dmc --help
 ```
 
+**Cleanup**
+
+```bash
+deactivate
+rm -rf test-pypi-env
+```
+
 ## 6) Publish to PyPI
+
+Back in your build terminal (`.venv-release`), upload to the live registry:
 
 ```bash
 python -m twine upload dist/*
@@ -105,18 +116,20 @@ Create a GitHub release and include:
 - upgrade command: `pipx upgrade docx-md-comments`
 - key changes and any migration notes.
 
-## 8) Post-release verification
+## 8) Post-release cleanup
 
-In a clean env:
+Remove the build environment and artifacts:
 
 ```bash
-python -m pip install --upgrade docx-md-comments
-dmc --help
+deactivate
+rm -rf .venv-release dist build *.egg-info
 ```
 
-Run one real conversion sanity check:
+## 9) Final user verification
+
+In your normal terminal (or using pipx):
 
 ```bash
-docx2md your.docx -o /tmp/your.md
-md2docx /tmp/your.md -o /tmp/your-roundtrip.docx
+pipx install docx-md-comments
+dmc --help
 ```

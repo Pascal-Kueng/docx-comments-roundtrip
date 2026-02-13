@@ -11,5 +11,11 @@ __pycache__/
 *.tmp
 *.bak
 
+# Build and distribution
+build/
+dist/
+*.egg-info/
+.venv*/
+
 # Manual roundtrip artifacts
 artifacts/
