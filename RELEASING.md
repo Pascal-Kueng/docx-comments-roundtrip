@@ -1,69 +1,167 @@
 # Releasing Guide
 
-Use this for every new release after `1.0.0`.
+Single source of truth for future package updates and releases.
 
-Detailed publish commands live in `PUBLISHING.md`.
+This repository uses Trusted Publishing via GitHub Actions:
 
-## 1) Choose version (semver)
+- Workflow: `.github/workflows/publish.yml`
+- Trigger 1: publish a GitHub Release -> auto publish to PyPI
+- Trigger 2: manual run with `target=testpypi|pypi`
+- Duplicate uploads are ignored (`skip-existing: true`)
 
-- Patch (`X.Y.Z+1`): bug fixes only.
-- Minor (`X.Y+1.0`): backward-compatible features.
-- Major (`X+1.0.0`): breaking changes.
+## 0) One-time setup (already done once, keep for reference)
 
-## 2) Update version in code
+GitHub repository:
 
-Edit both files:
+- Create environments: `pypi`, `testpypi`
+
+PyPI trusted publisher:
+
+- Owner: `Pascal-Kueng`
+- Repository: `docx-md-comments`
+- Workflow: `publish.yml`
+- Environment: `pypi`
+
+TestPyPI trusted publisher:
+
+- Owner: `Pascal-Kueng`
+- Repository: `docx-md-comments`
+- Workflow: `publish.yml`
+- Environment: `testpypi`
+
+No PyPI API token secrets are required for this flow.
+
+## 1) Choose version
+
+Follow semver:
+
+- Patch: `X.Y.Z+1` (bug fixes)
+- Minor: `X.Y+1.0` (new backward-compatible features)
+- Major: `X+1.0.0` (breaking changes)
+
+## 2) Bump version in code
+
+Update both files to the exact same value:
 
 - `pyproject.toml` -> `[project].version`
 - `src/dmc/version.py` -> `__version__`
 
-## 3) Run checks
+Example for `1.0.1`:
+
+```bash
+rg -n '^version =|__version__' pyproject.toml src/dmc/version.py
+```
+
+## 3) Run release checks locally
+
+Required:
 
 ```bash
 make test
 python -m unittest -q tests.test_cli_entrypoints
 ```
 
-If needed:
+Optional extra artifact check:
 
 ```bash
 make roundtrip-example
 ```
 
-## 4) Commit + tag
+## 4) Commit and push release candidate
 
 ```bash
-git add -A
+git add pyproject.toml src/dmc/version.py
+git add .github/workflows/publish.yml RELEASING.md
 git commit -m "release: vX.Y.Z"
-git tag vX.Y.Z
 git push
+```
+
+If workflow/docs were not changed in this release, omit those files from `git add`.
+
+## 5) Optional TestPyPI dry run (recommended)
+
+Use manual workflow dispatch:
+
+```bash
+gh workflow run Publish -f target=testpypi
+gh run list --workflow Publish --limit 5
+```
+
+Wait for run success before production release.
+
+## 6) Tag and create GitHub Release (production publish)
+
+Create and push tag:
+
+```bash
+git tag vX.Y.Z
 git push origin vX.Y.Z
 ```
 
-## 5) Build + publish
+Create/publish GitHub Release (this triggers PyPI publish automatically):
 
-Follow `PUBLISHING.md` sections:
+```bash
+gh release create vX.Y.Z --title "vX.Y.Z" --generate-notes
+```
 
-1. Ensure Trusted Publishing is configured (`pypi`/`testpypi` environments).
-2. Run Actions -> `Publish` with `target=testpypi`.
-3. Publish GitHub Release for `vX.Y.Z` tag to trigger PyPI publish.
+Equivalent UI path:
 
-## 6) GitHub release notes
+1. GitHub -> Releases -> Draft a new release
+2. Select tag `vX.Y.Z`
+3. Click `Publish release`
 
-Include:
+## 7) Verify published package
 
-- highlights / fixes
-- install command: `pipx install docx-md-comments`
-- upgrade command: `pipx upgrade docx-md-comments`
-- any migration notes (if breaking changes)
+Check workflow result:
 
-## 7) Post-release verification
+```bash
+gh run list --workflow Publish --limit 5
+```
 
-In a clean environment (or using pipx):
+Install from PyPI in a clean environment:
 
 ```bash
 pipx install docx-md-comments
 dmc --help
 ```
 
-Run one real conversion smoke test with a sample `.docx`.
+Or if already installed:
+
+```bash
+pipx upgrade docx-md-comments
+dmc --help
+```
+
+## 8) Release notes checklist
+
+Include in GitHub Release notes:
+
+- main fixes/features
+- install command: `pipx install docx-md-comments`
+- upgrade command: `pipx upgrade docx-md-comments`
+- migration notes for breaking changes
+
+## 9) Common failure modes
+
+`Publish` failed with auth/trusted-publisher errors:
+
+- Re-check PyPI/TestPyPI trusted publisher owner/repo/workflow/environment values.
+
+`Publish` failed due duplicate version:
+
+- With current config, duplicates should be skipped.
+- If nothing new uploaded, bump version and release new tag.
+
+Local tag already exists but remote does not:
+
+```bash
+git push origin <tag>
+```
+
+Need to recreate local tag:
+
+```bash
+git tag -d <tag>
+git tag <tag>
+git push origin <tag>
+```
