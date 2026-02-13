@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -25,8 +27,11 @@ CARD_HEADER_RE = re.compile(
 
 
 def run_converter(input_path: Path, output_path: Path) -> None:
+    cmd = [str(CONVERTER_PATH), str(input_path.absolute()), "-o", str(output_path.absolute())]
+    if os.name == "nt":
+        cmd = [sys.executable] + cmd
     subprocess.run(
-        [str(CONVERTER_PATH), str(input_path.absolute()), "-o", str(output_path.absolute())],
+        cmd,
         check=True,
         capture_output=True,
         text=True,

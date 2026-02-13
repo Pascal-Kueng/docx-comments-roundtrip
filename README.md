@@ -97,6 +97,11 @@ docx2md draft.docx -o draft.md --extract-media=media
 dmc md2docx draft.md --reference-doc=template.docx
 ```
 
+## Limitations
+
+- **Tracked Changes:** Word "Tracked Changes" (revisions) are not (yet) preserved through the roundtrip. They are accepted (merged) during the DOCX to Markdown conversion. It is recommended to handle (accept/reject) all tracked changes in Word before conversion, while leaving comments as needed so they can be addressed in Markdown (e.g., by an LLM).
+- **Formatting:** While Pandoc handles most formatting, the primary focus of this tool is the lossless conversion of comment threads. Complex layouts or advanced Word features may not always roundtrip perfectly if they are not supported by the Markdown intermediate format.
+
 ## Help
 
 ```bash

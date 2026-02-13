@@ -26,6 +26,12 @@ class TestCliEntrypoints(unittest.TestCase):
         env = os.environ.copy()
         if extra_env:
             env.update(extra_env)
+
+        # On Windows, extensionless scripts (shims) must be run via the python interpreter.
+        if os.name == "nt" and isinstance(cmd, list) and cmd[0].startswith("./"):
+            shim_path = cmd[0][2:]
+            cmd = [sys.executable, shim_path] + cmd[1:]
+
         proc = subprocess.run(cmd, cwd=str(cwd or REPO_ROOT), capture_output=True, text=True, env=env)
         return proc.returncode, proc.stdout, proc.stderr
 
@@ -37,12 +43,12 @@ class TestCliEntrypoints(unittest.TestCase):
             ["./docx-comments", "--help"],
             ["./d2m", "--help"],
             ["./m2d", "--help"],
-            ["python3", "-m", "dmc", "--help"],
+            [sys.executable, "-m", "dmc", "--help"],
         ]
         for cmd in commands:
             with self.subTest(cmd=" ".join(cmd)):
                 env = None
-                if cmd[:3] == ["python3", "-m", "dmc"]:
+                if cmd[:3] == [sys.executable, "-m", "dmc"]:
                     env = {"PYTHONPATH": str(REPO_ROOT / "src")}
                 code, stdout, stderr = self.run_cmd(cmd, extra_env=env)
                 self.assertEqual(

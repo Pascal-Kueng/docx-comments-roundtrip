@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -16,6 +18,8 @@ CONVERTER_PATH = REPO_ROOT / "docx-comments"
 
 def run_converter(converter_path: Path, input_path: Path, output_path: Path, cwd: Path) -> dict:
     cmd = [str(converter_path), str(input_path), "-o", str(output_path)]
+    if os.name == "nt":
+        cmd = [sys.executable] + cmd
     proc = subprocess.run(cmd, cwd=str(cwd), capture_output=True, text=True)
     return {
         "cmd": cmd,
