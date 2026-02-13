@@ -1,24 +1,37 @@
 # docx-md-comments
 
-Convert Word files with comments to Markdown, edit them, and convert back to Word while keeping comment threads intact.
+`docx-md-comments` is a DOCX to Markdown converter and Markdown to DOCX converter for one specific problem: preserving Microsoft Word comments through roundtrip edits.
 
-This tool preserves:
+It is built for workflows where you:
 
-- comment anchors
-- threaded replies
-- active/resolved state
+1. start with a Word `.docx` containing comments
+2. edit content in Markdown (manually or with an LLM)
+3. convert back to Word without losing comment structure
 
-If your workflow is:
+## At A Glance
 
-1. start with a `.docx` that has comments
-2. edit in Markdown (manually or with an LLM)
-3. convert back to `.docx`
+| Capability | Supported |
+| --- | --- |
+| DOCX -> Markdown conversion | Yes |
+| Markdown -> DOCX conversion | Yes |
+| Comment anchors | Preserved |
+| Threaded replies | Preserved |
+| Comment state (active/resolved) | Preserved |
+| Native Word comment thread reconstruction | Yes |
 
-then this package is built for that.
+## Why This Is Useful
+
+Most generic converters drop or flatten comment metadata. This project is focused on Word review workflows, so comments remain usable after conversion.
+
+Common use cases:
+
+- legal, scientific, or editorial review drafts with heavy comment threading
+- LLM-assisted editing of reviewed documents
+- roundtrip pipelines where Word comments must survive intact
 
 ## Before You Start
 
-You need:
+Requirements:
 
 - Python 3.10+
 - Pandoc installed and available on `PATH`
@@ -29,15 +42,21 @@ Install Pandoc:
 - Ubuntu/Debian: `sudo apt-get install pandoc`
 - Windows (PowerShell): `choco install pandoc -y`
 
-## Install (Recommended)
+## Install
 
-Use `pipx` (cleanest option for command-line apps):
+Recommended (`pipx`, isolated app install):
 
 ```bash
 pipx install docx-md-comments
 ```
 
-That gives you these commands:
+Alternative (`pip`):
+
+```bash
+python -m pip install docx-md-comments
+```
+
+Installed commands:
 
 - `dmc`
 - `docx-comments`
@@ -58,15 +77,7 @@ If installed with `pip`:
 python -m pip install --upgrade docx-md-comments
 ```
 
-## Install (Alternative)
-
-If you prefer `pip`:
-
-```bash
-python -m pip install docx-md-comments
-```
-
-## Quick Start (Most Users)
+## Quick Start
 
 Convert Word to Markdown:
 
@@ -74,7 +85,7 @@ Convert Word to Markdown:
 dmc draft.docx
 ```
 
-This creates `draft.md`.
+Creates `draft.md`.
 
 Convert Markdown back to Word:
 
@@ -82,11 +93,26 @@ Convert Markdown back to Word:
 dmc draft.md
 ```
 
-This creates `draft.docx`.
+Creates `draft.docx`.
 
-## More Commands (Optional)
+## LLM Editing Workflow
 
-These commands are equivalent; use whichever you prefer.
+1. Convert reviewed Word document to Markdown:
+
+```bash
+dmc reviewed.docx
+```
+
+2. Edit `reviewed.md` manually or with an LLM.
+3. Convert back to Word:
+
+```bash
+dmc reviewed.md
+```
+
+4. Open `reviewed.docx` in Word and continue normal comment-based review.
+
+## Command Variants
 
 DOCX -> Markdown:
 
@@ -142,7 +168,7 @@ dmc md2docx draft.md --reference-doc=template.docx
 ## Limitations
 
 - **Tracked Changes:** Word revisions are not preserved through roundtrip. Resolve them in Word first.
-- **Formatting:** Main focus is preserving comment threads. Very complex Word layouts may not roundtrip perfectly.
+- **Formatting:** This project prioritizes comment fidelity. Very complex layouts may not roundtrip perfectly.
 
 ## Help
 
@@ -186,8 +212,8 @@ When reporting a conversion bug, include:
 
 ## Technical Notes (Brief)
 
-- Markdown marker style uses `///C<ID>.START///` / `///C<ID>.END///` (with optional `==...==` highlight wrapper).
+- Marker style uses `///C<ID>.START///` / `///C<ID>.END///` (optional `==...==` wrapper).
 - Reply relationships are reconstructed as native Word threads (`commentsExtended.xml` `paraIdParent` + story markers).
-- The validator fails fast on malformed marker edits with line-specific diagnostics.
+- Validation fails fast on malformed marker edits with line-specific diagnostics.
 
-For deeper maintainer details, see `AGENTS.md`.
+For maintainer details, see `AGENTS.md`.
