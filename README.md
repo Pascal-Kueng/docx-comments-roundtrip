@@ -1,12 +1,23 @@
 # docx-md-comments
 
-`docx-md-comments` is a DOCX to Markdown converter and Markdown to DOCX converter for one specific problem: preserving Microsoft Word comments through roundtrip edits.
+[![PyPI version](https://img.shields.io/pypi/v/docx-md-comments.svg)](https://pypi.org/project/docx-md-comments/)
+[![Python versions](https://img.shields.io/pypi/pyversions/docx-md-comments.svg)](https://pypi.org/project/docx-md-comments/)
+[![License](https://img.shields.io/pypi/l/docx-md-comments.svg)](LICENSE)
+[![CI](https://img.shields.io/github/actions/workflow/status/Pascal-Kueng/docx-md-comments/ci.yml?branch=main&label=CI)](https://github.com/Pascal-Kueng/docx-md-comments/actions/workflows/ci.yml)
+
+`docx-md-comments` is a DOCX to Markdown converter and Markdown to DOCX converter focused on one hard problem: preserving Microsoft Word comments through roundtrip edits.
 
 It is built for workflows where you:
 
 1. start with a Word `.docx` containing comments
-2. edit content in Markdown (manually or with an LLM)
+2. edit content and comments in Markdown (manually or with an LLM)
 3. convert back to Word without losing comment structure
+
+LLM-focused benefit:
+
+- LLMs can draft or rewrite content
+- LLMs can add new comments and threaded replies in Markdown
+- those comments/replies are reconstructed as native Word comment threads on export
 
 ## At A Glance
 
@@ -18,6 +29,7 @@ It is built for workflows where you:
 | Threaded replies | Preserved |
 | Comment state (active/resolved) | Preserved |
 | Native Word comment thread reconstruction | Yes |
+| LLM-authored comments and replies roundtrip back to Word threads | Yes |
 
 ## Why This Is Useful
 
@@ -26,7 +38,7 @@ Most generic converters drop or flatten comment metadata. This project is focuse
 Common use cases:
 
 - legal, scientific, or editorial review drafts with heavy comment threading
-- LLM-assisted editing of reviewed documents
+- LLM-assisted editing where the model also writes comments/replies for reviewers
 - roundtrip pipelines where Word comments must survive intact
 
 ## Before You Start
@@ -104,6 +116,7 @@ dmc reviewed.docx
 ```
 
 2. Edit `reviewed.md` manually or with an LLM.
+   The LLM can update prose and add root comments or threaded replies.
 3. Convert back to Word:
 
 ```bash
