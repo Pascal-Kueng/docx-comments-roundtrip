@@ -120,7 +120,7 @@ class TestEdgeRoundtrips(unittest.TestCase):
                 self._run_case(case)
 
     def _run_case(self, case: dict) -> None:
-        case_dir = Path(tempfile.mkdtemp(prefix=f"edge-{case['name']}-", dir="/tmp"))
+        case_dir = Path(tempfile.mkdtemp(prefix=f"edge-{case['name']}-"))
         seed_md = case_dir / "seed.md"
         seed_docx = case_dir / "seed.docx"
         middle_md = case_dir / "middle.md"

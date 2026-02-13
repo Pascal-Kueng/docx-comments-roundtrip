@@ -51,7 +51,7 @@ class TestPreregistrationRoundtrip(unittest.TestCase):
             raise unittest.SkipTest(f"example fixture not found: {EXAMPLE_DOCX}")
 
     def test_comment_integrity_and_thread_roundtrip(self) -> None:
-        case_dir = Path(tempfile.mkdtemp(prefix="roundtrip-example-", dir="/tmp"))
+        case_dir = Path(tempfile.mkdtemp(prefix="roundtrip-example-"))
 
         source_docx = case_dir / "input.docx"
         intermediate_md = case_dir / "roundtrip.md"

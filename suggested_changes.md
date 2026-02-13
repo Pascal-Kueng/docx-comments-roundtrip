@@ -12,30 +12,39 @@ Implemented (Feb 2026).
   `w15:paraIdParent` in `word/commentsExtended.xml`.
 - Roundtrip tests assert parent-map parity and reply linkage preservation.
 
-## 1. High Priority
-
 ### Fix Test Portability
-The test suite currently hardcodes `/tmp` in `tempfile.mkdtemp` calls.
-- **Problem:** This causes failures on Windows and other systems without a global `/tmp`.
-- **Fix:** Remove the `dir="/tmp"` argument to allow the OS-default temporary directory to be used.
+Implemented (Feb 2026).
+
+- Removed hardcoded `/tmp` paths in tests; now uses `tempfile.gettempdir()`.
 
 ### Modernize Packaging (Cross-Platform Entry Points)
-The current Bash wrappers and `Makefile` are not native to Windows.
-- **Action:** Create a `pyproject.toml` and convert the project into a proper Python package.
-- **Benefit:** 
-    - Use `project.scripts` to define `docx-comments`, `docx2md`, and `md2docx` as cross-platform entry points (Windows `.exe` wrappers are created automatically by `pip`).
-    - Standardize dependency management.
-    - Replace `make test` with a Python-native runner like `pytest` or `tox`/`nox` for cross-platform CI.
+Implemented (Feb 2026).
 
-## 2. Medium Priority
+- Added `pyproject.toml` with `project.scripts`.
+- Converted project into `src/dmc` package structure.
+- Entry points `dmc`, `docx2md`, etc. are now cross-platform.
 
 ### Modularize the Codebase
-The `docx-comments` script is over 3,000 lines, making it difficult to maintain.
-- **Action:** Split the monolithic script into a package:
-    - `core/docx.py`: OOXML parsing and manipulation.
-    - `core/markdown.py`: Pandoc AST transformations and milestone handling.
-    - `core/roundtrip.py`: High-level conversion orchestration.
-    - `cli.py`: Argument parsing and environment checks.
+Implemented (Feb 2026).
+
+- Split monolithic script into `src/dmc/converter.py`, `src/dmc/cli.py`, etc.
+
+### CI/CD Implementation
+Implemented (Feb 2026).
+
+- Added `.github/workflows/ci.yml`.
+
+## 1. High Priority
+
+### Track Changes / Suggestions Roundtrip
+Currently, the tool focuses on comments. It should also support tracked changes (suggested additions/deletions).
+- **Goal:** Preserve `w:ins` (insertions) and `w:del` (deletions) through Markdown roundtrip.
+- **Challenge:**
+    - Nested edits (Author B editing Author A's insertion).
+    - Representing this in Markdown (e.g., `[text]{.insertion author="A"}` or `~~deleted~~{.deletion}`).
+    - Reconstructing valid OOXML `w:trackRevisions` structures.
+
+## 2. Medium Priority
 
 ### Transition to Pandoc Filters
 The current logic relies heavily on regex to manipulate Markdown text.
@@ -47,9 +56,6 @@ The current logic relies heavily on regex to manipulate Markdown text.
 - **Benefit:** Allows users to control verbosity (e.g., `-v` for debug logs) and provides a cleaner way to capture errors during batch processing.
 
 ## 3. Low Priority
-
-### CI/CD Implementation
-- **Action:** Add a `.github/workflows/test.yml` to run tests on every push across Linux, Mac, and Windows.
 
 ### Metadata Preservation
 - **Action:** Optionally extract Word document properties (Author, Title, Created Date) and store them in a Markdown YAML frontmatter, then restore them during `md -> docx`.

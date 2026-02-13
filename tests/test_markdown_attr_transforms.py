@@ -24,7 +24,7 @@ class TestMarkdownAttrTransforms(unittest.TestCase):
 
     def test_annotate_comment_attrs_does_not_touch_code_literals(self) -> None:
         annotate = self.converter_mod["annotate_markdown_comment_attrs"]
-        work_dir = Path(tempfile.mkdtemp(prefix="ast-annotate-", dir="/tmp"))
+        work_dir = Path(tempfile.mkdtemp(prefix="ast-annotate-"))
         md_path = work_dir / "input.md"
         md_path.write_text(
             (
@@ -61,7 +61,7 @@ class TestMarkdownAttrTransforms(unittest.TestCase):
 
     def test_strip_transport_attrs_does_not_touch_code_literals(self) -> None:
         strip_ast = self.converter_mod["strip_comment_transport_attrs_ast"]
-        work_dir = Path(tempfile.mkdtemp(prefix="ast-strip-", dir="/tmp"))
+        work_dir = Path(tempfile.mkdtemp(prefix="ast-strip-"))
         in_md = work_dir / "input.md"
         out_md = work_dir / "output.md"
         in_md.write_text(
@@ -125,7 +125,7 @@ class TestMarkdownAttrTransforms(unittest.TestCase):
 
     def test_milestone_tokens_expand_with_flexible_spacing(self) -> None:
         normalize_tokens = self.converter_mod["normalize_milestone_tokens_ast"]
-        work_dir = Path(tempfile.mkdtemp(prefix="ast-milestone-", dir="/tmp"))
+        work_dir = Path(tempfile.mkdtemp(prefix="ast-milestone-"))
         in_md = work_dir / "input.md"
         out_md = work_dir / "output.md"
         in_md.write_text(
@@ -245,7 +245,7 @@ class TestMarkdownAttrTransforms(unittest.TestCase):
         emit_cards = self.converter_mod["emit_milestones_and_cards_ast"]
         run_pandoc_json = self.converter_mod["run_pandoc_json"]
 
-        work_dir = Path(tempfile.mkdtemp(prefix="ast-card-placement-", dir="/tmp"))
+        work_dir = Path(tempfile.mkdtemp(prefix="ast-card-placement-"))
         md_path = work_dir / "input.md"
         md_path.write_text(
             (
@@ -291,7 +291,7 @@ class TestMarkdownAttrTransforms(unittest.TestCase):
         normalize_tokens = self.converter_mod["normalize_milestone_tokens_ast"]
         extract_comments = self.converter_mod["extract_comment_texts_from_markdown"]
 
-        work_dir = Path(tempfile.mkdtemp(prefix="ast-reply-cards-", dir="/tmp"))
+        work_dir = Path(tempfile.mkdtemp(prefix="ast-reply-cards-"))
         md_path = work_dir / "input.md"
         normalized_path = work_dir / "normalized.md"
         md_path.write_text(
@@ -359,7 +359,7 @@ class TestMarkdownAttrTransforms(unittest.TestCase):
     def test_root_end_marker_stays_before_card_block(self) -> None:
         emit_cards = self.converter_mod["emit_milestones_and_cards_ast"]
 
-        work_dir = Path(tempfile.mkdtemp(prefix="ast-end-before-card-", dir="/tmp"))
+        work_dir = Path(tempfile.mkdtemp(prefix="ast-end-before-card-"))
         md_path = work_dir / "input.md"
         md_path.write_text(
             (
@@ -397,7 +397,7 @@ class TestMarkdownAttrTransforms(unittest.TestCase):
 
     def test_extract_comments_rejects_unknown_parent(self) -> None:
         extract_comments = self.converter_mod["extract_comment_texts_from_markdown"]
-        work_dir = Path(tempfile.mkdtemp(prefix="ast-parent-unknown-", dir="/tmp"))
+        work_dir = Path(tempfile.mkdtemp(prefix="ast-parent-unknown-"))
         md_path = work_dir / "input.md"
         md_path.write_text(
             (
@@ -424,7 +424,7 @@ class TestMarkdownAttrTransforms(unittest.TestCase):
 
     def test_extract_comments_rejects_parent_cycle(self) -> None:
         extract_comments = self.converter_mod["extract_comment_texts_from_markdown"]
-        work_dir = Path(tempfile.mkdtemp(prefix="ast-parent-cycle-", dir="/tmp"))
+        work_dir = Path(tempfile.mkdtemp(prefix="ast-parent-cycle-"))
         md_path = work_dir / "input.md"
         md_path.write_text("Cycle test.\n", encoding="utf-8")
 

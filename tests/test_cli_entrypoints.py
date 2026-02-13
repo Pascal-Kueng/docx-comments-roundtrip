@@ -52,7 +52,7 @@ class TestCliEntrypoints(unittest.TestCase):
                 )
 
     def test_dmc_auto_detect_roundtrip(self):
-        case_dir = Path(tempfile.mkdtemp(prefix="cli-auto-", dir="/tmp"))
+        case_dir = Path(tempfile.mkdtemp(prefix="cli-auto-"))
         seed_md = case_dir / "seed.md"
         out_docx = case_dir / "out.docx"
         out_md = case_dir / "out.md"
@@ -67,7 +67,7 @@ class TestCliEntrypoints(unittest.TestCase):
         self.assertTrue(out_md.exists(), "Expected dmc to create markdown output")
 
     def test_dmc_subcommands_operate(self):
-        case_dir = Path(tempfile.mkdtemp(prefix="cli-subcmd-", dir="/tmp"))
+        case_dir = Path(tempfile.mkdtemp(prefix="cli-subcmd-"))
         source_docx = case_dir / "input.docx"
         out_md = case_dir / "from_subcommand.md"
         seed_md = case_dir / "seed.md"
@@ -111,7 +111,7 @@ class TestCliEntrypoints(unittest.TestCase):
         self.assertEqual(extra[ref_idx + 1], "template.docx")
 
     def test_legacy_converter_still_operates(self):
-        case_dir = Path(tempfile.mkdtemp(prefix="cli-legacy-", dir="/tmp"))
+        case_dir = Path(tempfile.mkdtemp(prefix="cli-legacy-"))
         source_docx = case_dir / "input.docx"
         out_md = case_dir / "out.md"
         shutil.copyfile(FIXTURE_DOCX, source_docx)
